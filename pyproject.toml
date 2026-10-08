@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "was-disaggregation"
+dynamic = ["version"]
+description = "Forecast-conditioned gridded stochastic weather generation and daily downscaling"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Mandela HOUNGNIBO"}]
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+keywords = ["weather-generator", "seasonal-forecast", "downscaling", "West-Africa", "xarray"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = [
+    "numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "xarray>=2023.6",
+    "netCDF4>=1.6", "dask[array]>=2023.6",
+]
+
+[project.urls]
+Source = "https://github.com/hmandela/was-disaggregation"
+Issues = "https://github.com/hmandela/was-disaggregation/issues"
+
+[project.optional-dependencies]
+notebooks = ["jupyterlab>=4", "nbformat>=5.9", "nbclient>=0.9", "matplotlib>=3.7"]
+dask = ["dask[array,distributed]>=2023.6"]
+ml = ["torch>=2.1"]
+test = ["pytest>=7.4"]
+
+[project.scripts]
+was-disaggregation = "was_disaggregation.cli:main"
+was-weather = "was_disaggregation.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "was_disaggregation._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["was_disaggregation*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff.lint]
+select = ["E9", "F821", "F822", "F823"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+pip = "*"
+
+[tool.pixi.pypi-dependencies]
+was-disaggregation = {path = ".", editable = true}
+
+[tool.pixi.feature.dev.pypi-dependencies]
+pytest = ">=7.4"
+build = ">=1.2"
+twine = ">=5"
+ruff = ">=0.11"
+setuptools = ">=77"
+wheel = "*"
+
+[tool.pixi.environments]
+default = {features = ["dev"], solve-group = "default"}
+ml = {features = ["dev", "ml"], solve-group = "default"}
+notebooks = {features = ["dev", "notebooks"], solve-group = "default"}
+
+[tool.pixi.tasks]
+test = "python -m pytest -q"
+lint = "ruff check was_disaggregation tests scripts"
+smoke = "python -m was_disaggregation.cli --help"
+build = {cmd = "python scripts/release.py build", depends-on = ["test", "lint"]}
+check = {cmd = "python scripts/release.py check", depends-on = ["build"]}
+verify-wheel = {cmd = "python scripts/release.py verify-wheel", depends-on = ["check"]}
+release-check = {depends-on = ["verify-wheel", "smoke"]}
+publish-testpypi = {cmd = "python scripts/release.py upload --repository testpypi", depends-on = ["release-check"]}
+publish-pypi = {cmd = "python scripts/release.py upload --repository pypi", depends-on = ["release-check"]}
