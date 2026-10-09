@@ -22,3 +22,5 @@ outputs/
 *.zarr/
 *.pt
 *.pth
+docs/
+CHANGELOG.md

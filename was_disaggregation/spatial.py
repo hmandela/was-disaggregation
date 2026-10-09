@@ -12,6 +12,37 @@ calibrated by bivariate-normal threshold inversion; continuous observations use
 Gaussian rank scores. Conditional Markov occurrence thresholds, Gamma marginal
 transforms, local VAR filters, and finite Fourier features introduce additional
 approximations. Generated physical correlations therefore still need validation.
+
+Scientific attribution
+----------------------
+* Wilks, D. S. (1998), "Multisite generalization of a daily stochastic
+  precipitation generation model", Journal of Hydrology 210(1-4), 178-191,
+  https://doi.org/10.1016/S0022-1694(98)00186-3: correlated latent Gaussian
+  random streams for multisite rainfall occurrence and amounts.
+* Wilks, D. S. (2002), "Realizations of daily weather in forecast seasonal
+  climate", Journal of Hydrometeorology 3(2), 195-207,
+  https://doi.org/10.1175/1525-7541(2002)003<0195:RODWIF>2.0.CO;2:
+  distance-based occurrence/amount dependence and climatological spatial
+  dependence held fixed under seasonal conditioning.
+* Plackett, R. L. (1954), "A reduction formula for normal multivariate
+  integrals", Biometrika 41(3-4), 351-360,
+  https://doi.org/10.1093/biomet/41.3-4.351: the bivariate-normal reduction
+  identity numerically integrated in ``_bivariate_normal_cdf``.
+* Rahimi, A., and Recht, B. (2007), "Random Features for Large-Scale Kernel
+  Machines", Advances in Neural Information Processing Systems 20,
+  https://papers.nips.cc/paper/2007/hash/013a006f03dbc5392effeb8f18fda755-Abstract.html:
+  paired sine/cosine Fourier features approximate a shift-invariant kernel.
+  The sphere embedding, spectral distributions and tile-stable draw scheme
+  used here are a weather-generator implementation choice.
+
+``GaussianSpatialField`` is a scalable kernel approximation with exact standard
+Gaussian marginal variance. ``DenseGaussianSpatialField`` uses the specified
+finite-domain covariance to numerical factorization precision. Dense Gaussian
+sampling is a standard linear-algebra construction, not a separate published
+physical weather model. Neither backend claims exact physical rainfall
+correlations, conditional Markov cross-site associations, tail dependence or
+reproduction of the Wilks station experiments. Chord-distance kernels and
+pair-sampling calibration are explicit package extensions.
 """
 
 from __future__ import annotations
@@ -115,7 +146,11 @@ def _sample_pairs(xyz, maximum, rng):
 
 
 def _bivariate_normal_cdf(a, b, rho):
-    """Deterministic Plackett integral; no randomized multivariate CDF calls."""
+    """Plackett (1954) reduction identity with deterministic quadrature.
+
+    See the full Biometrika reference in this module docstring. Quadrature is
+    a numerical approximation to the bivariate-normal probability integral.
+    """
     a, b, rho = np.broadcast_arrays(a, b, rho)
     t = rho[..., None] * (_QUAD_X + 1.0) / 2.0
     denom = 1.0 - t * t
@@ -314,6 +349,53 @@ def fit_distance_model(values, lat, lon, kind="exponential", max_pairs=2000,
     return result
 
 
+class DenseGaussianSpatialField:
+    """Gaussian field with the specified finite-domain covariance.
+
+    This reference backend factors the full kernel matrix by an eigendecomposition.
+    It is useful for small station sets and for checking the Fourier approximation.
+    It requires O(sites**2) memory and O(sites**3) setup; independent spatial tiles
+    would change the joint law, so use ``GaussianSpatialField`` for tiled domains.
+    Coincident coordinates are allowed and have perfectly correlated innovations.
+    Exactness refers to the chosen Gaussian covariance up to roundoff, not to
+    observed precipitation dependence or reproduction of Wilks (1998, 2002).
+    """
+
+    def __init__(self, lat, lon, model=None, seed=42, site_ids=None,
+                 n_features=None, max_sites=512):
+        self.lat, self.lon, xyz = _coordinates(lat, lon)
+        self.seed = _integer(seed, "seed")
+        self.model = dict(model or {"kind": "exponential", "range_km": 150.0})
+        limit = _integer(max_sites, "max_sites", 1)
+        if len(xyz) > limit:
+            raise MemoryError(f"Dense spatial factorization is limited to {limit} sites; use the features backend")
+        if site_ids is not None and len(site_ids) != len(xyz):
+            raise ValueError("site_ids must match the coordinate length")
+        distance = np.linalg.norm(xyz[:, None, :] - xyz[None, :, :], axis=-1)
+        covariance = kernel_correlation(distance, self.model)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        tolerance = 100 * np.finfo(float).eps * max(len(xyz), 1)
+        if eigenvalues.min(initial=0.) < -tolerance:
+            raise ValueError("The specified spatial covariance is not positive semidefinite")
+        # Clip numerical roundoff only. Adding a nugget would change the model.
+        self._factor = eigenvectors * np.sqrt(np.maximum(eigenvalues, 0.))[None, :]
+        reconstructed = self._factor @ self._factor.T
+        self.diagnostics = {
+            "backend": "dense",
+            "n_sites": len(xyz),
+            "distance_metric": "Earth-sphere 3-D chord kilometres",
+            "max_covariance_factorization_error": float(np.max(np.abs(reconstructed - covariance))),
+            "minimum_eigenvalue": float(eigenvalues.min()),
+            "tile_invariant": False,
+        }
+
+    def sample(self, n_members, step, stream):
+        n_members = _integer(n_members, "n_members", 1)
+        step, stream = _integer(step, "step", minimum=None), _integer(stream, "stream")
+        rng = np.random.default_rng(_seed(self.seed, 16180, step, stream))
+        return rng.normal(size=(n_members, len(self.lat))) @ self._factor.T
+
+
 class GaussianSpatialField:
     """Shared Gaussian field with O(sites * n_features) stored features.
 
@@ -327,6 +409,8 @@ class GaussianSpatialField:
     Draws are reproducible for a fixed NumPy version; member prefixes are stable.
     ``site_ids`` is accepted for the common interface and checked for length but
     does not affect the spatial field, which is defined by coordinates.
+    The paired Fourier map follows Rahimi and Recht (2007), Algorithm 1; the
+    sphere/chord kernel is a package adaptation of the Wilks spatial mechanism.
     """
 
     def __init__(self, lat, lon, model=None, seed=42, n_features=256, site_ids=None):
@@ -426,4 +510,4 @@ class IndependentField:
         return ndtri(uniform)
 
 
-__all__ = ["fit_distance_model", "kernel_correlation", "GaussianSpatialField", "IndependentField"]
+__all__ = ["fit_distance_model", "kernel_correlation", "GaussianSpatialField", "DenseGaussianSpatialField", "IndependentField"]

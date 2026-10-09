@@ -1,4 +1,51 @@
-"""Climatological terciles and forecast-conditioned historical year weights."""
+"""Climatological categories and forecast-conditioned historical year weights.
+
+Scientific scope
+----------------
+The Briggs--Wilks category-mass identity and Stedinger--Kim density-ratio
+identity are implemented directly. Empirical/Gamma/normal category estimators,
+empty-category policies, normal-score forecast densities, and optional
+within-category recalibration are explicit package choices. Three forecast
+probabilities do not identify a unique continuous forecast distribution.
+Yates/Clark rank selection is a component, not a reproduction of their complete
+regional kNN generator, climate scenarios, or RPSS optimization experiments.
+Historical category masses do not guarantee simulated seasonal category masses.
+
+References
+----------
+* William M. Briggs and Daniel S. Wilks (1996), "Extension of the Climate
+  Prediction Center Long-Lead Temperature and Precipitation Outlooks to General
+  Weather Statistics". https://doi.org/10.1175/1520-0442(1996)009<3496:EOTCPC>2.0.CO;2
+  Core: historical-year weights conditional on seasonal categories.
+* Daniel S. Wilks (2002), "Realizations of Daily Weather in Forecast Seasonal
+  Climate". https://doi.org/10.1175/1525-7541(2002)003<0195:RODWIF>2.0.CO;2
+  Core: Gamma precipitation and normal temperature climatological categories.
+* Jery R. Stedinger and Young-Oh Kim (2010), "Probabilities for Ensemble
+  Forecasts Reflecting Climate Information".
+  https://doi.org/10.1016/j.jhydrol.2010.06.038
+  Core: density-ratio weights; forecast-density construction and category
+  recalibration here are declared variants.
+* David Yates, Subhrendu Gangopadhyay, Balaji Rajagopalan and Kenneth Strzepek
+  (2003), "A Technique for Generating Regional Climate Scenarios Using a
+  Nearest-Neighbor Algorithm". https://doi.org/10.1029/2002WR001769
+  Background: preferential rank selection, not the complete scenario generator.
+* Martyn P. Clark, Subhrendu Gangopadhyay, David Brandon, Kevin Werner,
+  Lauren E. Hay, Balaji Rajagopalan and David Yates (2004), "A Resampling
+  Procedure for Generating Conditioned Daily Weather Sequences".
+  https://doi.org/10.1029/2003WR002747
+  Core component: Eq. (9) rank-selection probabilities integrated analytically.
+* Rob J. Hyndman and Yanan Fan (1996), "Sample Quantiles in Statistical
+  Packages". https://doi.org/10.1080/00031305.1996.10473566
+  Numerical convention: type 5 (Hazen) and type 7 (linear) quantiles.
+* Mandela Coovi Mahuwetin Houngnibo, Abdou Ali, Alhassane Agali, Moussa Waongo,
+  Agnide Emmanuel Lawin and Jean-Martial Cohard (2023), "Stochastic
+  Disaggregation of Seasonal Precipitation Forecasts of the West African
+  Regional Climate Outlook Forum". https://doi.org/10.1002/joc.8161
+  Protocol component: empirical Hazen category thresholds.
+
+These are scientific-method attributions; software authorship is recorded
+separately in the package metadata and copyright notices.
+"""
 from __future__ import annotations
 
 import warnings
@@ -12,7 +59,8 @@ FLAG_INVALID_PROBABILITY = 2
 FLAG_NO_HISTORY = 4
 
 
-def classify_seasons(totals, years, climatology=(1991, 2020), method="empirical"):
+def classify_seasons(totals, years, climatology=(1991, 2020), method="empirical",
+                     quantile_method="linear", *, allow_negative=False):
     """Classify complete seasonal rainfall totals using fixed reference years.
 
     ``totals`` is year,site and must already be computed with ``skipna=False``.
@@ -20,6 +68,11 @@ def classify_seasons(totals, years, climatology=(1991, 2020), method="empirical"
     or cells with fewer than three reference years receive category -1.
     Gamma uses a fitted zero-inflated Gamma; degenerate/insufficient positive
     samples fall back to empirical thresholds. Ties are never randomized.
+    ``quantile_method='hazen'`` selects the Hyndman–Fan type 5 sample
+    quantiles used by Houngnibo et al. (2023); the default ``'linear'``
+    retains NumPy's type 7 quantiles from the 0.8.0 release. The choice
+    also applies to empirical fallbacks from a Gamma fit. Use
+    :func:`classify_values` for signed seasonal temperature statistics.
     """
     values = np.asarray(totals, dtype=float)
     years = np.asarray(years)
@@ -29,19 +82,25 @@ def classify_seasons(totals, years, climatology=(1991, 2020), method="empirical"
         raise ValueError("Season years must be unique.")
     if method not in {"empirical", "gamma"}:
         raise ValueError("method must be 'empirical' or 'gamma'.")
+    if quantile_method not in {"linear", "hazen"}:
+        raise ValueError("quantile_method must be 'linear' or 'hazen'.")
+    if not isinstance(allow_negative, (bool, np.bool_)):
+        raise ValueError("allow_negative must be a bool")
+    if allow_negative and method == "gamma":
+        raise ValueError("gamma requires nonnegative seasonal totals")
     if len(climatology) != 2 or climatology[0] > climatology[1]:
         raise ValueError("climatology must be (first_year,last_year), inclusive.")
     reference = (years >= climatology[0]) & (years <= climatology[1])
     if not reference.any():
         raise ValueError("No historical season years overlap the requested climatology.")
-    valid = np.isfinite(values) & (values >= 0)
+    valid = np.isfinite(values) & (allow_negative | (values >= 0))
     thresholds = np.full((2, values.shape[1]), np.nan)
     categories = np.full(values.shape, -1, dtype=np.int8)
     for site in range(values.shape[1]):
         sample = values[reference & valid[:, site], site]
         if sample.size < 3:
             continue
-        quantiles = np.quantile(sample, [1. / 3., 2. / 3.])
+        quantiles = np.quantile(sample, [1. / 3., 2. / 3.], method=quantile_method)
         if method == "gamma":
             positive = sample[sample > 0]
             p_zero = 1. - positive.size / sample.size
@@ -65,8 +124,49 @@ def classify_seasons(totals, years, climatology=(1991, 2020), method="empirical"
     return categories, thresholds
 
 
+def classify_values(values, years, climatology=(1991, 2020), quantile_method="linear",
+                    method="empirical"):
+    """Terciles of a signed seasonal statistic such as mean TMAX/TMIN.
+
+    With ``quantile_method='hazen'``, use the same type 5 plotting positions
+    as Houngnibo et al. (2023). Unlike :func:`classify_seasons`, finite
+    negative values are legitimate observations (e.g. Celsius in winter).
+    With ``method='normal'``, use Wilks's (2002) Gaussian seasonal-temperature
+    thresholds ``mean + Phi^-1(1/3, 2/3) * sample_std``, where sample_std
+    uses ``ddof=1`` on the fixed reference years. ``quantile_method`` has no
+    effect on the Gaussian thresholds.
+    Returns ``(categories, thresholds)`` with the same shape convention.
+    """
+    if method not in {"empirical", "normal"}:
+        raise ValueError("method must be 'empirical' or 'normal'")
+    categories, thresholds = classify_seasons(
+        values, years, climatology=climatology, method="empirical",
+        quantile_method=quantile_method, allow_negative=True)
+    if method == "empirical":
+        return categories, thresholds
+    values = np.asarray(values, dtype=float)
+    years = np.asarray(years)
+    reference = (years >= climatology[0]) & (years <= climatology[1])
+    z_terciles = stats.norm.ppf([1. / 3., 2. / 3.])
+    for site in range(values.shape[1]):
+        column = values[:, site]
+        valid = np.isfinite(column)
+        sample = column[reference & valid]
+        if sample.size < 3:
+            continue
+        q = sample.mean() + z_terciles * sample.std(ddof=1)
+        thresholds[:, site] = q
+        categories[valid, site] = np.where(column[valid] <= q[0], 0,
+                                            np.where(column[valid] <= q[1], 1, 2))
+    return categories, thresholds
+
+
 def year_weights(categories, probabilities, empty_policy="climatology"):
     """Return p(category)/n(category) per historical year and site plus flags.
+
+    Briggs and Wilks (1996); Wilks (2002), cited in the module References.
+    Exact historical category masses require donors in every targeted class.
+    Empty-category policies below are package support-handling extensions.
 
     Flags are uint8 bits: 1=empty positive-probability category, 2=invalid
     forecast, 4=no complete history. Invalid forecasts/history receive zero
@@ -88,7 +188,9 @@ def year_weights(categories, probabilities, empty_policy="climatology"):
         valid = cats[:, site] >= 0
         if not valid.any():
             flags[site] |= FLAG_NO_HISTORY
-        p = probs[:, site]
+        # Empty-category renormalization must not rewrite the caller's
+        # forecast array, which may be reused by other fitted methods.
+        p = probs[:, site].copy()
         total = p.sum()
         if (not np.isfinite(p).all() or (p < 0).any()
                 or not (abs(total - 1.) <= .020000001 or abs(total - 100.) <= 2.0000001)):
@@ -242,8 +344,10 @@ def tercile_pdf_ratio_weights(zscores, categories, probabilities, calibrate=True
     """Stedinger–Kim pdf-ratio year weights from a tercile forecast.
 
     q_y = f1(z_y)/f0(z_y) with f0 = N(0,1) and f1 = :func:`tercile_normal_forecast`.
-    Unlike p/N weights, years deep in a tail get less weight than years near the
-    centre of the favoured category. With ``calibrate=True`` (default) the q_y
+    Unlike p/N weights, relative preferences within each category depend on the
+    entire forecast/climatology density ratio. Tail weights may increase or
+    decrease: for a more dispersed normal forecast they increase with |z|.
+    With ``calibrate=True`` (default) the q_y
     are rescaled inside each category so that category masses equal PB, PN, PA
     exactly, i.e. the Briggs–Wilks tercile mass is kept and only the
     within-category shape comes from the pdf ratio. ``empty_policy`` follows
@@ -253,6 +357,10 @@ def tercile_pdf_ratio_weights(zscores, categories, probabilities, calibrate=True
     z = np.asarray(zscores, dtype=float)
     cats = np.asarray(categories)
     probs = np.asarray(probabilities, dtype=float)
+    if z.shape != cats.shape:
+        raise ValueError("zscores must have the same (year, site) shape as categories")
+    if not isinstance(calibrate, (bool, np.bool_)):
+        raise ValueError("calibrate must be a bool")
     base, flags = year_weights(cats, probs, empty_policy=empty_policy)
     mu, sigma = tercile_normal_forecast(probs, min_normal)
     with np.errstate(invalid="ignore", over="ignore"):
@@ -292,6 +400,16 @@ def class_weights(base_weights, categories, fallback_weights=None):
     w = np.asarray(base_weights, dtype=float)
     cats = np.asarray(categories)
     fb = w if fallback_weights is None else np.asarray(fallback_weights, dtype=float)
+    if w.ndim != 2 or cats.shape != w.shape or fb.shape != w.shape:
+        raise ValueError("base, categories and fallback must share (year, site) shape")
+    if not np.isin(cats, (-1, 0, 1, 2)).all():
+        raise ValueError("categories must contain -1, 0, 1 or 2")
+    if any(not np.isfinite(a).all() or np.any(a < 0) for a in (w, fb)):
+        raise ValueError("base and fallback weights must be finite and nonnegative")
+    # Missing historical seasons never gain support through a fallback.
+    fb = np.where(cats >= 0, fb, 0.)
+    total_fb = fb.sum(axis=0)
+    fb = np.divide(fb, total_fb, out=np.zeros_like(fb), where=total_fb > 0)
     out = np.zeros((3,) + w.shape)
     empty = np.zeros((3, w.shape[1]), dtype=bool)
     for c in range(3):
@@ -313,6 +431,10 @@ def yates_rank_probabilities(n, strength=1.0, selection=1.0):
 
     Yates et al. (2003) / Clark et al. (2004a): strength (lambda) > 1 favours
     the most similar years, selection (alpha) >= 1 truncates to the best N/alpha.
+    Clark et al. (2004), Eq. (9), DOI 10.1029/2003WR002747; complete authors
+    and the Yates source are listed in the module References. Analytic masses
+    remove finite donor-bootstrap noise; no kNN climate-scenario generator or
+    cross-validated optimization of strength/selection is performed here.
     """
     if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
         raise ValueError("n must be a positive integer.")

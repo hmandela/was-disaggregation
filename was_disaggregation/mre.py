@@ -11,23 +11,64 @@ where w0 is a prior (uniform, or e.g. ENSO rank weights) and
     D = KL(w || w0)                      method='mre'   (Weijs & van de Giesen 2013)
     D = (n/2) sum (w - w0)^2             method='croley' (Croley 1996, 2000)
 
-The tolerance tau_k is the probability error you accept on constraint k: with
+This is the legacy soft mode. Exact mode instead minimizes D(w,w0) subject to
+the feasible equalities P_w[class_k = c] = p_kc. The tolerance tau_k is a
+penalty scale rather than a strict bound on probability error: with
 compatible forecasts every constraint is met to within ~tau_k^2 * lambda; with
 conflicting forecasts (e.g. wet total AND late onset when history says late
 onsets are dry) the solution trades the constraints off in proportion to 1/tau_k^2
-instead of failing. Only the below (first) and above (last) class probabilities
-enter explicitly; the middle class follows from sum w = 1.
+instead of failing. All three categories enter the soft loss so exchanging
+category labels cannot change the objective. Their exact equalities are
+linearly dependent and redundant rows are removed only after feasibility is
+checked.
 
 MRE solution: w_y = w0_y exp(lambda . g_y) / Z with g_y the class indicators.
-Both methods are solved in the dual by batched damped Newton over all sites.
+The soft objectives are solved in the dual by batched damped Newton. Exact
+mode first tests support feasibility by linear programming, removes redundant
+equalities by QR, then solves a constrained primal program with SLSQP per site.
+
+Scientific scope
+----------------
+The exact MRE problem uses the published minimum-relative-entropy principle.
+The generalized Euclidean prior-distance objective is Croley-inspired; it
+reduces to the usual uniform-prior quadratic adjustment up to scaling when
+the prior is uniform. Symmetric three-category soft penalties, nonuniform
+priors, support checks and regional fraction constraints are explicit package
+extensions. Exact donor constraints do not establish exact generated weather
+attributes after a parametric fit or daily resampling.
+
+References
+----------
+* Stefan V. Weijs and Nick van de Giesen (2013), "An Information-Theoretical
+  Perspective on Weighted Ensemble Forecasts".
+  https://doi.org/10.1016/j.jhydrol.2013.06.033
+  Core: minimize KL divergence from prior weights under new forecast constraints.
+* Thomas E. Croley II (1996), "Using NOAA's New Climate Outlooks in Operational
+  Hydrology". https://doi.org/10.1061/(ASCE)1084-0699(1996)1:3(93)
+  Background: constrained adjustment of historical scenario probabilities;
+  the general-prior Euclidean and soft formulations here are declared variants.
+* Thomas E. Croley II (2000), "Using Meteorology Probability Forecasts in
+  Operational Hydrology". https://doi.org/10.1061/9780784404591
+  Background: ensemble probabilities reflecting meteorological event forecasts.
+* William M. Briggs and Daniel S. Wilks (1996), "Extension of the Climate
+  Prediction Center Long-Lead Temperature and Precipitation Outlooks to General
+  Weather Statistics". https://doi.org/10.1175/1520-0442(1996)009<3496:EOTCPC>2.0.CO;2
+  Core special case: a single categorical forecast gives p(category)/n(category).
+
+Scientific attributions are separate from software authorship recorded in
+package metadata and copyright notices. Published application experiments are
+not reproduced by solving these finite optimization problems alone.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
+import warnings
 import xarray as xr
-from scipy.special import logsumexp
+from scipy.linalg import qr
+from scipy.optimize import Bounds, LinearConstraint, linprog, minimize
+from scipy.special import logsumexp, xlogy
 
 from .conditioning import classify_seasons, FLAG_INVALID_PROBABILITY, FLAG_NO_HISTORY
 
@@ -128,15 +169,60 @@ def thresholds_for(constraint, target=None, n_sites=None):
 
 
 def _features(categories):
-    """(year, site) classes -> indicators of class 0 and 2: (year, site, 2)."""
-    return np.stack([(categories == 0), (categories == 2)], axis=-1).astype(float)
+    """All three indicators; redundancy is harmless and keeps soft loss symmetric."""
+    return np.stack([(categories == c) for c in range(3)], axis=-1).astype(float)
 
 
-def solve_weights(features, targets, prior, tau, method="mre", max_iter=100, tol=1e-9):
-    """Batched dual Newton for the relaxed MRE / Croley problem.
+def _solve_exact_site(g, target, prior, method, max_iter, tol, site):
+    """Constrained primal optimization on the positive support of one prior."""
+    supported = prior > 0
+    A = np.vstack((np.ones(supported.sum()), g[supported].T))
+    b = np.r_[1., target]
+    feasible = linprog(np.zeros(supported.sum()), A_eq=A, b_eq=b,
+                       bounds=(0, None), method="highs")
+    if not feasible.success:
+        raise ValueError(f"site {site}: exact forecast constraints are infeasible on the prior support")
+    # Duplicate or linearly dependent class indicators are common. SLSQP
+    # requires an independent equality system, after feasibility has been checked.
+    _, R, pivot = qr(A.T, mode="economic", pivoting=True)
+    rank = int(np.sum(np.abs(np.diag(R)) > 1e-11 * max(A.shape)
+                      * (np.abs(R).max() if R.size else 1.)))
+    rows = np.sort(pivot[:rank])
+    equalities = LinearConstraint(A[rows], b[rows], b[rows])
+    w0 = prior[supported] / prior[supported].sum()
+    if method == "mre":
+        objective = lambda w: float(np.sum(xlogy(w, w / w0)))
+        gradient = lambda w: np.log(np.maximum(w, 1e-300) / w0) + 1.
+    else:
+        n = float(len(prior))
+        objective = lambda w: float(n * np.sum((w - w0) ** 2) / 2)
+        gradient = lambda w: n * (w - w0)
+    result = minimize(objective, feasible.x, jac=gradient, method="SLSQP",
+                      constraints=[equalities], bounds=Bounds(0, np.inf),
+                      options={"maxiter": max_iter, "ftol": min(tol, 1e-12)})
+    residual = np.max(np.abs(A @ result.x - b))
+    if not result.success or residual > max(1e-8, 10 * tol):
+        raise RuntimeError(f"site {site}: exact {method} optimization did not converge: {result.message}")
+    weights = np.zeros(len(prior), float)
+    weights[supported] = result.x
+    return weights, result.nit
+
+
+def solve_weights(features, targets, prior, tau, method="mre", max_iter=100, tol=1e-9,
+                  constraint_mode="soft"):
+    """Optimize MRE / Croley weights with soft or exact forecast constraints.
+
+    Scientific sources: Weijs and van de Giesen (2013), DOI
+    10.1016/j.jhydrol.2013.06.033, and Croley (1996, 2000), listed in the module
+    References. ``mre`` uses KL; ``croley`` is the package's generalized
+    Euclidean prior-distance variant. Symmetric soft penalties are extensions.
 
     features (year, site, K), targets (site, K), prior (year, site) >= 0 with
     zero for excluded years, tau (K,). Returns weights (year, site) and info.
+    ``constraint_mode='soft'`` retains the 0.8.0 quadratic penalty with positive
+    ``tau``. ``'exact'`` imposes all target equalities within numerical tolerance
+    on the support of the prior and raises ValueError for infeasible sites. The
+    exact option solves a separate constrained program per site, so it is slower.
     """
     g = np.asarray(features, float)
     t = np.asarray(targets, float)
@@ -155,9 +241,30 @@ def solve_weights(features, targets, prior, tau, method="mre", max_iter=100, tol
         raise ValueError("tau must contain finite positive tolerances")
     if not isinstance(max_iter, (int, np.integer)) or max_iter < 1 or not np.isfinite(tol) or tol <= 0:
         raise ValueError("max_iter and tol must be positive")
+    if method not in {"mre", "croley"}:
+        raise ValueError("method must be 'mre' or 'croley'")
+    if constraint_mode not in {"soft", "exact"}:
+        raise ValueError("constraint_mode must be 'soft' or 'exact'")
     tau2 = tau ** 2
     active = w0.sum(axis=0) > 0
     w0 = np.divide(w0, w0.sum(axis=0, keepdims=True), out=np.zeros_like(w0), where=active[None])
+    if constraint_mode == "exact":
+        weights = np.zeros_like(w0)
+        iterations = np.zeros(ns, int)
+        for site in np.flatnonzero(active):
+            weights[:, site], iterations[site] = _solve_exact_site(
+                g[:, site], t[site], w0[:, site], method, max_iter, tol, site)
+        achieved = np.einsum("ys,ysk->sk", weights, g)
+        info = {"lambda": None, "achieved": achieved,
+                "iterations": iterations, "converged": np.ones(ns, dtype=bool),
+                "effective_years": np.divide(1., (weights ** 2).sum(0), out=np.zeros(ns), where=active),
+                "kl_from_prior": np.where(active, (
+                    weights * np.log(np.where(weights > 0, weights, 1) /
+                                     np.where(w0 > 0, w0, 1))).sum(0), np.nan),
+                "constraint_mode": constraint_mode}
+        info["active"] = active
+        info["max_constraint_error"] = np.max(np.abs(achieved - t), axis=1)
+        return weights, info
     lam = np.zeros((ns, K))
 
     if method == "mre":
@@ -224,6 +331,11 @@ def solve_weights(features, targets, prior, tau, method="mre", max_iter=100, tol
     w[:, ~active] = 0.
     # Report convergence of the returned iterate, including the last update.
     converged = (np.abs(grad).max(axis=1) < tol) | ~active
+    if np.any(active & ~converged):
+        warnings.warn(f"{method} solver did not converge at "
+                      f"{int(np.sum(active & ~converged))} active site(s); "
+                      "inspect info['converged'] before using the weights.",
+                      RuntimeWarning, stacklevel=2)
     if method == "croley":
         mass = w.sum(axis=0)
         w = np.divide(w, mass, out=np.zeros_like(w), where=mass > 0)
@@ -231,20 +343,30 @@ def solve_weights(features, targets, prior, tau, method="mre", max_iter=100, tol
     achieved = np.einsum("ys,ysk->sk", w, gg)
     info = {"lambda": lam, "achieved": achieved, "iterations": it, "converged": converged,
             "effective_years": np.divide(1., (w ** 2).sum(0), out=np.zeros(ns), where=active),
-            "kl_from_prior": np.where(active, (w * np.log(np.where(w > 0, w, 1) / np.where(w0 > 0, w0, 1))).sum(0), np.nan)}
+            "kl_from_prior": np.where(active, (w * np.log(np.where(w > 0, w, 1) / np.where(w0 > 0, w0, 1))).sum(0), np.nan),
+            "constraint_mode": constraint_mode}
+    info["active"] = active
+    info["max_constraint_error"] = np.max(np.abs(achieved - np.asarray(targets)), axis=1)
     return w, info
 
 
 def constrained_year_weights(attribute_values: dict, probabilities: dict, years, climatology=(1991, 2020),
                              prior=None, tolerances=None, method="mre", tercile_method="empirical",
-                             miss_tolerance=0.05, min_effective_years=5.0, thresholds=None):
-    """Year weights (year, site) satisfying several tercile forecasts at once.
+                             miss_tolerance=0.05, min_effective_years=5.0, thresholds=None,
+                             constraint_mode="soft"):
+    """Year weights (year, site) targeting several tercile forecasts at once.
+
+    Uses the MRE principle of Weijs and van de Giesen (2013), or a declared
+    Croley-inspired quadratic variant; complete references are in the module
+    docstring. Exact mode satisfies feasible donor targets to numerical
+    tolerance; soft mode trades off errors through the package penalty.
 
     attribute_values : {name: (year, site)} historical season attributes
     probabilities    : {name: (3, site)} forecast probabilities, low -> high
     prior            : (year,) or (year, site) nonnegative prior weights, or None
     tolerances       : {name: tau}; default 0.01 for every constraint
     thresholds       : {name: (2, site)} fixed class limits replacing terciles
+    constraint_mode  : 'soft' (legacy penalty) or 'exact' (feasible equalities)
 
     Returns ``(weights, flags, info)``. Flags extend :func:`year_weights`:
     2 invalid forecast, 4 no history, 8 a constraint missed by more than
@@ -274,20 +396,24 @@ def constrained_year_weights(attribute_values: dict, probabilities: dict, years,
             thr = np.broadcast_to(np.asarray(fixed, float), (2, ns))
             c = classify_fixed(values, thr)
         else:
-            c, thr = classify_seasons(values, years, climatology=climatology, method=tercile_method)
+            c, thr = classify_seasons(values, years, climatology=climatology,
+                                     method=tercile_method,
+                                     allow_negative=tercile_method == "empirical")
         cats[name], limits[name] = c, thr
         valid_year &= c >= 0
         p = np.asarray(probabilities[name], float)
         if p.shape != (3, ns):
             raise ValueError(f"{name}: probabilities must be (3, site)")
         total = p.sum(0)
-        bad = ~np.isfinite(p).all(0) | (p < 0).any(0) | (np.abs(total - 1) > 0.02001)
+        bad = (~np.isfinite(p).all(0) | (p < 0).any(0) |
+               ~((np.abs(total - 1) <= 0.020000001) |
+                 (np.abs(total - 100) <= 2.0000001)))
         flags[bad] |= FLAG_INVALID_PROBABILITY
         p = np.divide(p, total, out=np.full_like(p, 1 / 3), where=~bad)
         normalized[name] = np.where(bad[None], np.nan, p)
         feats.append(_features(c))
-        targets.append(np.stack([p[0], p[2]], axis=-1))
-        taus += [tolerances[name]] * 2
+        targets.append(p.T)
+        taus += [tolerances[name]] * 3
     if prior is None:
         w0 = valid_year.astype(float)
     else:
@@ -300,7 +426,7 @@ def constrained_year_weights(attribute_values: dict, probabilities: dict, years,
     w0[:, invalid] = 0.
     flags[(w0.sum(0) == 0) & ~invalid] |= FLAG_NO_HISTORY
     weights, info = solve_weights(np.concatenate(feats, -1), np.concatenate(targets, -1), w0,
-                                  np.asarray(taus), method=method)
+                                  np.asarray(taus), method=method, constraint_mode=constraint_mode)
     achieved, target = {}, {}
     for name in names:
         c = cats[name]

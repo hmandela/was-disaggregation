@@ -1,4 +1,36 @@
-"""High-level xarray interface for the gridded parametric weather generator."""
+"""High-level xarray orchestration of parametric daily weather generation.
+
+Scientific attribution and protocol boundaries
+---------------------------------------------
+Clarence W. Richardson (1981), "Stochastic simulation of daily precipitation,
+temperature, and solar radiation", Water Resources Research 17, 182-190.
+DOI: 10.1029/WR017i001p00182.
+    Markov rainfall occurrence and wet/dry-conditioned multivariate residuals;
+    see rainfall.py and multivariate.py for distributions and variants.
+Daniel S. Wilks (2002), "Realizations of Daily Weather in Forecast Seasonal
+Climate", Journal of Hydrometeorology 3, 195-207.
+DOI: 10.1175/1525-7541(2002)003<0195:RODWIF>2.0.CO;2.
+    paper_protocol="wilks_2002" selects the corresponding rainfall and
+    temperature fitting conventions, not a rerun of the New York experiment.
+M. C. M. Houngnibo, A. Ali, A. Agali, M. Waongo, A. E. Lawin and
+J.-M. Cohard (2023), "Stochastic disaggregation of seasonal precipitation
+forecasts of the West African Regional Climate Outlook Forum",
+International Journal of Climatology 43, 5569-5585. DOI: 10.1002/joc.8161.
+    paper_protocol="houngnibo_2023_srg1", "houngnibo_2023_srg2" and
+    "houngnibo_2023_srg3" select SRG conventions; see rainfall.py/srg3.py
+    for the full article reference and configurable differences.
+William M. Briggs and Daniel S. Wilks (1996), DOI:
+10.1175/1520-0442(1996)009<3496:EOTCPC>2.0.CO;2.
+    Forecast-dependent historical weights; see conditioning.py for the title
+    and for Stedinger/Kim density-ratio attribution.
+
+Per-member parameter mixtures, finite-season moment calculations, shrinkage,
+physical pair policies and tiled spatial approximations are package extensions.
+Averaged parameters or exact donor weights do not impose exact probabilities
+on generated seasonal totals. References in each computational module explain
+which equations are inherited and which variants must be evaluated separately.
+Software authorship is Mandela HOUNGNIBO, distinct from scientific attribution.
+"""
 from __future__ import annotations
 import json
 import warnings
@@ -6,19 +38,23 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from .data import canonicalize_observations, prepare_probabilities, seasonal_cube, season_dates, validate_months
-from .conditioning import (classify_seasons, year_weights, normal_scores,
+from .conditioning import (classify_seasons, classify_values, year_weights, normal_scores,
                            tercile_pdf_ratio_weights, class_weights)
 from scipy.special import ndtr
-from .rainfall import fit_rainfall, simulate_rainfall, seasonal_total_moments
+from .rainfall import (fit_rainfall, fit_wilks_forecast_plane, simulate_rainfall,
+                       seasonal_total_moments)
+from .srg3 import fit_srg3, simulate_srg3
 from .multivariate import fit_multivariate, simulate_multivariate
-from .spatial import GaussianSpatialField, IndependentField, fit_distance_model, _integer
+from .spatial import (GaussianSpatialField, DenseGaussianSpatialField,
+                      IndependentField, fit_distance_model, _integer)
 
 
 class WeatherGenerator:
     """Condition daily weather on seasonal PRCP tercile probabilities.
 
-    Other variables respond through their historical association with PRCP
-    categories. They are not independently conditioned on temperature forecasts.
+    By default, other variables respond through their historical association
+    with PRCP categories. Optional ``temperature_probabilities`` conditions
+    TMIN and TMAX curves on their own seasonal forecasts.
     The baseline MUST match the forecast provider; 1991–2020 is an explicit
     configurable assumption, since the supplied forecast has no baseline metadata.
     Use ``generate_dask`` for domains larger than ``max_sites``.
@@ -28,21 +64,22 @@ class WeatherGenerator:
     conditioning : {'mean', 'mixture'}
         'mean' is Wilks (2002): one parameter set equal to the forecast-weighted
         average over tercile classes (Eqs. 2, 4-8). Averaging collapses the
-        three-class mixture, so seasonal totals are under-dispersed and the
-        near-normal category is over-produced. 'mixture' fits one parameter set
+        three-class mixture, which can under-disperse seasonal totals and
+        over-produce the near-normal category; this is not a universal identity. 'mixture' fits one parameter set
         per tercile class (years of that class only) and lets every member draw
         its class from (PB, PN, PA). This retains variability between the
         class-specific parameter sets, subject to the shrinkage below.
     mixture_shrinkage : {'variance', 'none'} or float in [0, 1]
         Tercile classes are defined by the outcome itself, so class-fitted
         parameters also absorb the weather noise that selected those years; a
-        raw mixture ('none') over-disperses seasonal totals. Member weights are
+        raw mixture ('none') can over-disperse seasonal totals. Member weights are
         blended as (1-k) w_forecast + k w_class; 'variance' chooses k per cell so
-        that, under climatological probabilities, approximate stationary
-        Markov moments (Katz 1985) approach the observed interannual variance.
-        This is a heuristic: month boundaries, finite-season corrections and
-        semi-Markov run hazards are not represented by those moments. Nonlinear
-        parameter fitting also prevents an exact forecast-mean identity.
+        that a moment-based interpolation approaches observed interannual
+        variance. The finite-season Markov-reward recurrence includes month
+        boundaries; spell models and amount-driven state feedback use the
+        stationary approximation instead (see rainfall.seasonal_total_moments).
+        The subsequent nonlinear parameter refit still makes the interpolation
+        heuristic; no exact variance or forecast-mean identity is guaranteed.
     class_draw : {'fitted', 'shared'}
         How a member's class varies in space. 'shared' uses one uniform per
         member for the whole domain (class = forecast quantile at every cell);
@@ -78,6 +115,41 @@ class WeatherGenerator:
         generated totals low and inflates the below-normal frequency.
     persistence : {'climatology', 'weighted', 'independent'}
         'weighted' re-estimates d from forecast-weighted transitions (Eq. 3 analogue).
+    paper_protocol : {'houngnibo_2023_srg1', 'houngnibo_2023_srg2',
+                      'houngnibo_2023_srg3', 'wilks_2002'}, optional
+        Apply the paper's threshold, Hazen terciles, yearly occurrence weights,
+        raw wet-day amounts and monthly resets. SRG3 uses its separate
+        three-state Markov/KDE fit. The Wilks option fits a plane to two
+        mixed-exponential means over a six-point forecast grid. Spatial fields
+        and extra variables remain extensions; these presets do not reproduce
+        published station results.
+    temperature_probabilities : dict, optional
+        Map ``TMIN`` and/or ``TMAX`` to their own PB/PN/PA DataArray. Historical
+        temperature means are classified against Gaussian terciles before the
+        forecast weights are used for the variable's conditioned curves.
+    temperature_surface : {'moment', 'wilks_2002'}, optional
+        Use exact daily class-mixture moments or Wilks' affine mean/quadratic
+        standard-deviation surfaces. The Wilks preset selects the latter.
+    srg3_options : dict, optional
+        Explicit KDE/percentile/initial-state choices forwarded to ``fit_srg3``.
+        The high-level interface rejects negative-support raw KDE simulation.
+    spatial_backend : {'features', 'dense'}
+        Shared Fourier approximation, or finite-domain covariance factorization
+        for at most ``max_dense_sites`` cells (default 512). Dense cannot be tiled.
+    pair_policy : {'sort', 'none', 'error'}
+        Handle generated TMIN/TMAX or HUMIN/HUMAX crossings explicitly. Sorting
+        restores ordering but modifies the individual marginal distributions.
+    residual_covariance : {'unit', 'fit'}
+        Normalize stationary VAR marginal variances or retain fitted covariance.
+
+    References
+    ----------
+    Clarence W. Richardson (1981); Daniel S. Wilks (2002);
+    M. C. M. Houngnibo et al. (2023); William M. Briggs and Daniel S. Wilks
+    (1996). Full references and protocol scope are given in this module and
+    the rainfall, multivariate, conditioning and SRG3 module docstrings.
+    Mixture/shrinkage settings are package variants, not a claim of greater
+    skill than these authors' methods.
     """
     def __init__(self, months=(7, 8, 9), climatology=(1991, 2020),
                  wet_threshold=1., spatial="distance", seed=42,
@@ -88,7 +160,70 @@ class WeatherGenerator:
                  conditioning="mean", class_draw="fitted", weighting="tercile",
                  amount_distribution="gamma", hold_alpha=True, mixture_shrinkage="variance",
                  trace_rainfall=True, constraints=None, year_prior=None, total_tolerance=0.01,
-                 occurrence="markov", max_dry_run=40, max_wet_run=15, spell_prior=3.0):
+                 occurrence="markov", max_dry_run=40, max_wet_run=15, spell_prior=3.0,
+                 *, paper_protocol=None, quantile_method="linear", wet_rule="ge",
+                 amount_basis="excess", reset_each_month=False, pdf_ratio_calibrate=True,
+                 temperature_probabilities=None, constraint_mode="soft",
+                 spatial_backend="features", max_dense_sites=512,
+                 temperature_surface=None, srg3_options=None, pair_policy="sort", residual_covariance="unit",
+                 _wilks_domain_alpha=None):
+        paper_protocols = {None, "houngnibo_2023_srg1", "houngnibo_2023_srg2",
+                           "houngnibo_2023_srg3", "wilks_2002"}
+        if paper_protocol not in paper_protocols:
+            raise ValueError(f"paper_protocol must be one of {paper_protocols}")
+        if paper_protocol is not None:
+            # This preset fixes the principal statistical conventions in the
+            # original station-level paper. Gridded spatial fields and other
+            # variables remain extensions, not published numerical replicas.
+            if paper_protocol == "wilks_2002":
+                wet_threshold, wet_rule = 0., "gt"
+                tercile_method, persistence = "gamma", "climatology"
+                amount_basis, reset_each_month = "raw", False
+                amount_distribution, hold_alpha = "mixed_exponential", True
+            else:
+                wet_threshold, wet_rule = 0.1, "gt"
+                quantile_method, persistence = "hazen", "yearly"
+                amount_basis, reset_each_month = "raw", True
+                empty_policy = "raise"
+                amount_distribution = ("mixed_exponential" if paper_protocol.endswith("srg2")
+                                       else "kde" if paper_protocol.endswith("srg3") else "gamma")
+                hold_alpha = False
+            conditioning, weighting, occurrence = "mean", "tercile", "markov"
+            trace_rainfall = False
+            if constraints or year_prior is not None:
+                raise ValueError("Paper protocols do not use additional constraints or year_prior")
+        if quantile_method not in {"linear", "hazen"}:
+            raise ValueError("quantile_method must be 'linear' or 'hazen'")
+        if wet_rule not in {"ge", "gt"}:
+            raise ValueError("wet_rule must be 'ge' or 'gt'")
+        if amount_basis not in {"excess", "raw"}:
+            raise ValueError("amount_basis must be 'excess' or 'raw'")
+        if constraint_mode not in {"soft", "exact"}:
+            raise ValueError("constraint_mode must be 'soft' or 'exact'")
+        if temperature_surface not in {None, "moment", "wilks_2002"}:
+            raise ValueError("temperature_surface must be 'moment' or 'wilks_2002'")
+        if srg3_options is not None and not isinstance(srg3_options, dict):
+            raise ValueError("srg3_options must be a dict of fit_srg3 keyword options")
+        self.temperature_surface = temperature_surface or ("wilks_2002" if paper_protocol == "wilks_2002" else "moment")
+        self.srg3_options = dict(srg3_options or {})
+        if self.srg3_options.get("state_interval") == "raw":
+            raise ValueError("Raw Gaussian KDE can generate negative rain; use fit_srg3/simulate_srg3 directly "
+                             "for that mathematical sensitivity experiment, or choose 'truncate'/'positive'")
+        if pair_policy not in {"sort", "none", "error"}:
+            raise ValueError("pair_policy must be 'sort', 'none' or 'error'")
+        self.pair_policy = pair_policy
+        if residual_covariance not in {"unit", "fit"}:
+            raise ValueError("residual_covariance must be 'unit' or 'fit'")
+        self.residual_covariance = residual_covariance
+        if "wet_threshold" in self.srg3_options:
+            raise ValueError("Use the WeatherGenerator wet_threshold argument rather than srg3_options['wet_threshold']")
+        if self.srg3_options and paper_protocol != "houngnibo_2023_srg3":
+            raise ValueError("srg3_options requires paper_protocol='houngnibo_2023_srg3'")
+        if temperature_probabilities is not None:
+            if not isinstance(temperature_probabilities, dict) or not temperature_probabilities:
+                raise ValueError("temperature_probabilities must map TMIN/TMAX to forecast DataArrays")
+            if set(temperature_probabilities) - {"TMIN", "TMAX"}:
+                raise ValueError("Only TMIN and TMAX temperature forecasts are supported")
         if occurrence not in {"markov", "spell"}:
             raise ValueError("occurrence must be 'markov' or 'spell'")
         self.occurrence = occurrence
@@ -112,8 +247,9 @@ class WeatherGenerator:
             raise ValueError("constraints require weighting='mre' or 'croley'")
         if year_prior is not None and weighting not in {"mre", "croley"}:
             raise ValueError("year_prior requires weighting='mre' or 'croley'")
-        if amount_distribution not in {"gamma", "mixed_exponential"}:
-            raise ValueError("amount_distribution must be 'gamma' or 'mixed_exponential'")
+        if amount_distribution not in {"gamma", "mixed_exponential"} and not (
+                paper_protocol == "houngnibo_2023_srg3" and amount_distribution == "kde"):
+            raise ValueError("amount_distribution must be 'gamma' or 'mixed_exponential'; 'kde' requires SRG3")
         self.conditioning, self.class_draw, self.weighting = conditioning, class_draw, weighting
         self.amount_distribution, self.hold_alpha = amount_distribution, bool(hold_alpha)
         if not ((isinstance(mixture_shrinkage, str) and mixture_shrinkage in {"variance", "none"}) or
@@ -123,8 +259,12 @@ class WeatherGenerator:
         self.trace_rainfall = bool(trace_rainfall)
         if spatial not in {"distance", "independent"}:
             raise ValueError("spatial must be 'distance' or 'independent'")
-        if not np.isfinite(wet_threshold) or wet_threshold <= 0:
-            raise ValueError("wet_threshold must be positive")
+        if spatial_backend not in {"features", "dense"}:
+            raise ValueError("spatial_backend must be 'features' or 'dense'")
+        self.spatial_backend = spatial_backend
+        self.max_dense_sites = _integer(max_dense_sites, "max_dense_sites", 1)
+        if not np.isfinite(wet_threshold) or wet_threshold < 0 or (wet_threshold == 0 and wet_rule != "gt"):
+            raise ValueError("wet_threshold must be positive, or zero with wet_rule='gt'")
         self.months = validate_months(months)
         self.climatology = tuple(climatology)
         self.wet_threshold = float(wet_threshold)
@@ -139,6 +279,15 @@ class WeatherGenerator:
         self.empty_policy = empty_policy
         self.train_years = train_years
         self.persistence = persistence
+        self.paper_protocol = paper_protocol
+        self.quantile_method = quantile_method
+        self.wet_rule = wet_rule
+        self.amount_basis = amount_basis
+        self.reset_each_month = bool(reset_each_month)
+        self.pdf_ratio_calibrate = bool(pdf_ratio_calibrate)
+        self.temperature_probabilities = dict(temperature_probabilities or {})
+        self.constraint_mode = constraint_mode
+        self._wilks_domain_alpha = _wilks_domain_alpha
 
     def fit(self, observations: xr.Dataset, probabilities: xr.DataArray, *, site_ids=None):
         """Fit a bounded spatial domain; no array is interpolated silently in time."""
@@ -169,13 +318,16 @@ class WeatherGenerator:
         # A missing day must never become a reduced/zero seasonal total.
         totals = np.where(np.isfinite(rain).all(axis=1), np.nansum(rain, axis=1), np.nan)
         cats, thresholds = classify_seasons(totals, self.years_, climatology=self.climatology,
-                                            method=self.tercile_method)
+                                            method=self.tercile_method,
+                                            quantile_method=self.quantile_method)
         prob = self.probabilities_.transpose("probability", "Y", "X").values.reshape(3, nsite)
         weights, flags = year_weights(cats, prob, empty_policy=self.empty_policy)
         if self.weighting == "pdf_ratio":
             zscores = normal_scores(totals, self.years_, climatology=self.climatology,
                                     method=self.tercile_method)
-            pdf_w, _ = tercile_pdf_ratio_weights(zscores, cats, prob, empty_policy=self.empty_policy)
+            pdf_w, _ = tercile_pdf_ratio_weights(zscores, cats, prob,
+                                                  calibrate=self.pdf_ratio_calibrate,
+                                                  empty_policy=self.empty_policy)
             weights = np.where(weights.sum(axis=0, keepdims=True) > 0, pdf_w, 0.)
         elif self.weighting in {"mre", "croley"}:
             weights, flags, cats, thresholds = self._constrained_weights(obs, totals, prob, nsite)
@@ -189,13 +341,40 @@ class WeatherGenerator:
             name="seasonal_PRCP_threshold", attrs={"units": "mm", "climatology": str(self.climatology)})
         self.year_weights_ = xr.DataArray(weights.reshape(n_year, len(self.y_), len(self.x_)),
             dims=("season_year", "Y", "X"), coords={"season_year":self.years_, "Y":self.y_, "X":self.x_})
+        variable_weights = {}
+        temperature_forecasts = {}
+        self.temperature_year_weights_ = {}
+        for name, forecast in self.temperature_probabilities.items():
+            if name not in values:
+                raise ValueError(f"{name} forecast requires {name} in the observations")
+            temperature = values[name]
+            complete = np.isfinite(temperature).all(axis=1)
+            mean = np.where(complete, np.nanmean(temperature, axis=1), np.nan)
+            temp_cats, _ = classify_values(mean, self.years_, climatology=self.climatology,
+                                           method="normal")
+            temp_prob = prepare_probabilities(forecast, target=obs)
+            w, temp_flags = year_weights(temp_cats, temp_prob.values.reshape(3, nsite),
+                                         empty_policy=self.empty_policy)
+            if not np.any(w.sum(axis=0) > 0):
+                raise ValueError(f"No usable temperature forecast weights for {name}")
+            variable_weights[name] = w
+            temperature_forecasts[name] = (temp_cats, temp_prob.values.reshape(3, nsite))
+            self.temperature_year_weights_[name] = xr.DataArray(
+                w.reshape(n_year, len(self.y_), len(self.x_)),
+                dims=("season_year", "Y", "X"),
+                coords={"season_year":self.years_, "Y":self.y_, "X":self.x_},
+                attrs={"forecast_variable": name, "flags": np.unique(temp_flags).tolist()})
         rain_options = dict(wet_threshold=self.wet_threshold, persistence=self.persistence,
-                            amount_distribution=self.amount_distribution, include_trace=self.trace_rainfall)
+                            amount_distribution=self.amount_distribution, include_trace=self.trace_rainfall,
+                            wet_rule=self.wet_rule, amount_basis=self.amount_basis,
+                            reset_each_month=self.reset_each_month,
+                            state_from_amount=self.paper_protocol in {
+                                "houngnibo_2023_srg1", "houngnibo_2023_srg2"})
         if self.occurrence == "spell":
             rain_options.update(occurrence="spell", max_dry_run=self.max_dry_run, max_wet_run=self.max_wet_run,
                                 spell_prior=self.spell_prior,
                                 initial_state=self._initial_state(obs, nsite))
-        if self.amount_distribution == "mixed_exponential":
+        if self.amount_distribution == "mixed_exponential" and self.paper_protocol != "wilks_2002":
             # Climatological mixed exponential: mixing weight held fixed (Wilks 2002)
             # and starting values for every conditioned EM fit.
             clim_w = (cats >= 0).astype(float)
@@ -203,9 +382,22 @@ class WeatherGenerator:
             rain_options["amount_init"] = (clim.alpha, clim.beta1, clim.beta2)
             if self.hold_alpha:
                 rain_options["alpha_fixed"] = clim.alpha
-        self.rain_fit_ = fit_rainfall(rain, self.month_, weights, **rain_options)
+        if self.paper_protocol == "houngnibo_2023_srg3":
+            self.rain_fit_ = fit_srg3(rain, self.month_, weights,
+                                      wet_threshold=self.wet_threshold, **self.srg3_options)
+        elif self.paper_protocol == "wilks_2002":
+            self.rain_fit_ = fit_wilks_forecast_plane(
+                rain, self.month_, cats, prob, wet_threshold=self.wet_threshold,
+                wet_rule=self.wet_rule, domain_alpha=self._wilks_domain_alpha)
+        else:
+            self.rain_fit_ = fit_rainfall(rain, self.month_, weights, **rain_options)
         self.multi_fit_ = fit_multivariate(values, rain, self.month_, weights,
-                                           wet_threshold=self.wet_threshold) if values else None
+                                           wet_threshold=self.wet_threshold,
+                                           wet_rule=self.wet_rule,
+                                           variable_weights=variable_weights,
+                                           temperature_forecasts=temperature_forecasts,
+                                           temperature_surface=self.temperature_surface,
+                                           residual_covariance=self.residual_covariance) if values else None
         self.class_rain_fits_, self.class_multi_fits_ = None, None
         if self.conditioning == "mixture":
             cw, empty_class = class_weights(weights, cats, fallback_weights=weights)
@@ -218,7 +410,12 @@ class WeatherGenerator:
             if self.multi_fit_ is not None:
                 self.class_multi_fits_ = [fit_multivariate(values, rain, self.month_, cw[c],
                                                            wet_threshold=self.wet_threshold,
-                                                           dependence=self.multi_fit_) for c in range(3)]
+                                                           wet_rule=self.wet_rule,
+                                                           dependence=self.multi_fit_,
+                                                           variable_weights=variable_weights,
+                                                           temperature_forecasts=temperature_forecasts,
+                                                           temperature_surface=self.temperature_surface,
+                                                           residual_covariance=self.residual_covariance) for c in range(3)]
             self.empty_class_ = empty_class
         lat, lon = np.meshgrid(self.y_, self.x_, indexing="ij")
         self.lat_, self.lon_ = lat.ravel(), lon.ravel()
@@ -227,8 +424,10 @@ class WeatherGenerator:
         if self.site_ids_.size != nsite:
             raise ValueError("site_ids must contain one ID per grid cell")
         self.spatial_models_ = dict(self.spatial_models or {})
-        stream_values = {"occurrence": np.where(np.isfinite(rain), (rain >= self.wet_threshold).astype(float), np.nan),
-                         "amount": np.where(rain > self.wet_threshold, rain-self.wet_threshold, np.nan)}
+        wet_mask = rain >= self.wet_threshold if self.wet_rule == "ge" else rain > self.wet_threshold
+        stream_values = {"occurrence": np.where(np.isfinite(rain), wet_mask.astype(float), np.nan),
+                         "amount": np.where(wet_mask, rain if self.amount_basis == "raw"
+                                            else rain-self.wet_threshold, np.nan)}
         self.variable_names_ = list(self.multi_fit_.variables) if self.multi_fit_ is not None else []
         if self.multi_fit_ is not None:
             residuals = getattr(self.multi_fit_, "climatological_innovations", None)
@@ -261,16 +460,24 @@ class WeatherGenerator:
                              else "bits: 1 empty-category fallback; 2 invalid forecast; 4 no complete history"),
             "conditioning": self.conditioning, "weighting": self.weighting,
             "amount_distribution": self.amount_distribution,
+            "paper_protocol": self.paper_protocol,
+            "quantile_method": self.quantile_method,
+            "wet_rule": self.wet_rule,
+            "amount_basis": self.amount_basis,
+            "temperature_forecasts": sorted(self.temperature_year_weights_),
             "weight_implied_probability_mean": np.nanmean(np.where(prob >= 0, implied, np.nan), axis=1).tolist(),
             "rainfall": self.rain_fit_.diagnostics,
             "other_variables": getattr(self.multi_fit_, "diagnostics", {}),
-            "spatial": "whole-season stationary kernels; approximate Fourier Gaussian copula" if self.spatial == "distance" else "independent site innovations",
+            "spatial": (f"whole-season stationary kernels; {self.spatial_backend} Gaussian copula"
+                        if self.spatial == "distance" else "independent site innovations"),
             "forecast_match": "Parameter conditioning does not guarantee exact seasonal category frequencies"}
         self.weight_implied_probability_ = xr.DataArray(implied.reshape(3, len(self.y_), len(self.x_)),
             dims=("probability", "Y", "X"), coords={"probability": ["PB", "PN", "PA"], "Y": self.y_, "X": self.x_})
         if self.conditioning == "mixture":
             self.diagnostics_["empty_class_cells"] = self.empty_class_.sum(axis=1).tolist()
             self.diagnostics_["mixture_kappa_mean"] = float(np.nanmean(self.mixture_kappa_.values))
+            if hasattr(self, "_kappa_moments"):
+                self.diagnostics_["mixture_moments"] = self._kappa_moments
         if np.any(flags & 1):
             warnings.warn("Some cells have empty forecast categories; inspect diagnostics_ weight flags", UserWarning)
         return self
@@ -307,8 +514,10 @@ class WeatherGenerator:
                     key = stream_keys.get(stream)
                     if key not in self.spatial_models_:
                         raise KeyError(f"Missing spatial model for stream {stream} ({key})")
-                    fields[stream] = GaussianSpatialField(self.lat_, self.lon_, model=self.spatial_models_[key],
-                        seed=self.seed, n_features=self.n_features, site_ids=self.site_ids_)
+                    field_class = DenseGaussianSpatialField if self.spatial_backend == "dense" else GaussianSpatialField
+                    extra = {"max_sites": self.max_dense_sites} if self.spatial_backend == "dense" else {}
+                    fields[stream] = field_class(self.lat_, self.lon_, model=self.spatial_models_[key],
+                        seed=self.seed, n_features=self.n_features, site_ids=self.site_ids_, **extra)
             return fields[stream].sample(n+member_start, step, stream)[member_start:]
         rain_fit, multi_fit, classes = self.rain_fit_, self.multi_fit_, None
         if self.conditioning == "mixture":
@@ -320,12 +529,19 @@ class WeatherGenerator:
                 mb, mn, ma = self.class_multi_fits_
                 multi_fit = mb.select(classes, (mn, ma))
                 multi_fit.valid = multi_fit.valid & self.multi_fit_.valid
-        rain = simulate_rainfall(rain_fit, self.month_, n_members, draw, wet_threshold=self.wet_threshold)
+        rain = (simulate_srg3(rain_fit, self.month_, n_members, draw)
+                if self.paper_protocol == "houngnibo_2023_srg3"
+                else simulate_rainfall(rain_fit, self.month_, n_members, draw,
+                                       wet_threshold=self.wet_threshold))
         generated = {"PRCP": rain}
         if multi_fit is not None:
             generated.update(simulate_multivariate(multi_fit, rain, self.month_, draw,
-                                                  wet_threshold=self.wet_threshold))
+                                                  wet_threshold=self.wet_threshold,
+                                                  wet_rule=self.wet_rule, pair_policy=self.pair_policy))
             self.diagnostics_["simulation_constraints"] = multi_fit.simulation_diagnostics
+        self.diagnostics_["spatial_fields"] = {
+            stream_keys.get(stream, str(stream)): dict(getattr(field, "diagnostics", {}))
+            for stream, field in fields.items()}
         ds = xr.Dataset({v: (("member", "T", "Y", "X"), a.reshape(n_members, len(dates), len(self.y_), len(self.x_)).astype("float32"))
                          for v,a in generated.items()},
                         coords={"member":np.arange(member_start,member_start+n_members), "T":dates, "Y":self.y_, "X":self.x_})
@@ -340,10 +556,14 @@ class WeatherGenerator:
         ds.attrs.update(generator=f"was-disaggregation {__version__}: forecast-conditioned Richardson/Wilks extension",
                         conditioning=self.conditioning, weighting=self.weighting,
                         amount_distribution=self.amount_distribution, occurrence=self.occurrence,
+                        paper_protocol=self.paper_protocol or "none",
+                        wet_rule=self.wet_rule, amount_basis=self.amount_basis,
+                        quantile_method=self.quantile_method,
                         season_months=",".join(map(str,self.months)), seed=self.seed,
                         climatology=f"{self.climatology[0]}-{self.climatology[1]}",
                         training_years=f"{self.years_.min()}-{self.years_.max()}",
                         wet_threshold_mm=self.wet_threshold, spatial_method=self.spatial,
+                        spatial_backend=self.spatial_backend,
                         caveat="Daily parameter conditioning; evaluate seasonal tercile frequency mismatch",
                         leap_day_policy="February 29 excluded")
         return ds
@@ -364,7 +584,7 @@ class WeatherGenerator:
             dates = dates[~((dates.month == 2) & (dates.day == 29))][-look:]
             x = np.asarray(stacked.reindex(T=dates).values, dtype=float)[::-1]    # day before start first
             ok = np.isfinite(x)
-            state = x >= self.wet_threshold
+            state = x >= self.wet_threshold if self.wet_rule == "ge" else x > self.wet_threshold
             same = ok & (state == state[0][None])
             run = np.argmin(np.vstack([same, np.zeros((1, nsite), bool)]), axis=0)
             wet0[i] = np.where(ok[0], state[0].astype(float), np.nan)
@@ -400,7 +620,8 @@ class WeatherGenerator:
             prior = np.asarray(self.year_prior.sel(season_year=self.years_).values, dtype=float)
         weights, flags, info = constrained_year_weights(
             values, probs, self.years_, climatology=self.climatology, prior=prior, tolerances=tols,
-            method=self.weighting, tercile_method=self.tercile_method, thresholds=thr_fixed)
+            method=self.weighting, tercile_method=self.tercile_method, thresholds=thr_fixed,
+            constraint_mode=self.constraint_mode)
         shape = (len(self.y_), len(self.x_))
         coords = {"constraint": info["names"], "probability": ["PB", "PN", "PA"], "Y": self.y_, "X": self.x_}
         self.constraint_info_ = xr.Dataset({
@@ -426,16 +647,25 @@ class WeatherGenerator:
             return np.ones(nsite)
         if not isinstance(self.mixture_shrinkage, str):
             return np.full(nsite, float(self.mixture_shrinkage))
-        moments = [seasonal_total_moments(fit_rainfall(rain, self.month_, cw[c], **rain_options), self.month_)
+        moments_method = ("stationary_approx" if rain_options.get("occurrence") == "spell"
+                          or rain_options.get("state_from_amount") else "exact")
+        moments = [seasonal_total_moments(fit_rainfall(rain, self.month_, cw[c], **rain_options), self.month_,
+                                         method=moments_method)
                    for c in range(3)]
         means = np.stack([m for m, _ in moments])
-        noise = np.nanmean(np.stack([v for _, v in moments]), axis=0)
-        between = np.nanvar(means, axis=0)
+        probabilities = np.asarray(self.prob_flat_)
+        noise = np.sum(probabilities * np.stack([v for _, v in moments]), axis=0)
+        center = np.sum(probabilities * means, axis=0)
+        between = np.sum(probabilities * (means - center[None, :])**2, axis=0)
         reference = (self.years_ >= self.climatology[0]) & (self.years_ <= self.climatology[1])
         observed = np.nanvar(np.where(cats[reference] >= 0, totals[reference], np.nan), axis=0, ddof=1)
         kappa2 = np.divide(observed - noise, between, out=np.zeros(nsite), where=between > 0)
         kappa = np.sqrt(np.clip(np.nan_to_num(kappa2), 0, 1))
-        self._kappa_moments = {"noise_var": noise, "between_var": between, "observed_var": observed}
+        self._kappa_moments = {"noise_var": noise, "between_var": between, "observed_var": observed,
+                               "noise_exceeds_observed": noise > observed,
+                               "no_between_class_variance": between <= 0,
+                               "moments_method": moments_method,
+                               "caveat": "Shrinkage is approximate: refitted parameter moments depend nonlinearly on blended year weights"}
         return kappa
 
     def _draw_classes(self, n_members, member_start, draw):

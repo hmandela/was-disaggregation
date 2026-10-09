@@ -4,6 +4,48 @@ The whole-season analog is a transparent baseline, not the Apipattanavis KNN
 algorithm. A donor is shared by every variable, day and grid cell. This preserves
 the historical weather field but a single regional donor distribution generally
 cannot satisfy a different tercile forecast at every cell.
+
+Scientific scope
+----------------
+``schaake_shuffle`` implements the rank-permutation core of Clark et al.
+(2004b). ``ForecastSchaakeGenerator`` is a forecast-conditioned variant of
+Clark et al. (2004a): templates are complete seasons aligned to the target
+calendar, without an initial random date offset. Daily marginal donors do use
+the configured date window. ``enso_rank_weights`` integrates Clark's Eq. (9)
+rank rule exactly, but does not fit its parameters by RPSS or reproduce the
+complete Yates regional kNN scenario generator. Weighted templates, physical
+bound swaps and missing-data policies are declared package extensions.
+
+References
+----------
+* Martyn P. Clark, Subhrendu Gangopadhyay, David Brandon, Kevin Werner,
+  Lauren E. Hay, Balaji Rajagopalan and David Yates (2004a), "A Resampling
+  Procedure for Generating Conditioned Daily Weather Sequences".
+  https://doi.org/10.1029/2003WR002747
+  Core: conditional marginal resampling, coherent historical rank templates,
+  and climate-index rank selection; calendar-aligned templates are a variant.
+* Martyn P. Clark, Subhrendu Gangopadhyay, Lauren E. Hay, Balaji Rajagopalan
+  and Robert L. Wilby (2004b), "The Schaake Shuffle: A Method for Reconstructing
+  Space-Time Variability in Forecasted Precipitation and Temperature Fields".
+  https://doi.org/10.1175/1525-7541(2004)005<0243:TSSAMF>2.0.CO;2
+  Core: rank reordering; random tie breaking is explicit and does not promise
+  exact Spearman agreement when historical values are tied.
+* David Yates, Subhrendu Gangopadhyay, Balaji Rajagopalan and Kenneth Strzepek
+  (2003), "A Technique for Generating Regional Climate Scenarios Using a
+  Nearest-Neighbor Algorithm". https://doi.org/10.1029/2002WR001769
+  Background: preferential rank selection only; the full generator is absent.
+* William M. Briggs and Daniel S. Wilks (1996), "Extension of the Climate
+  Prediction Center Long-Lead Temperature and Precipitation Outlooks to General
+  Weather Statistics". https://doi.org/10.1175/1520-0442(1996)009<3496:EOTCPC>2.0.CO;2
+  Core component: forecast-conditioned historical-year category masses.
+* Jery R. Stedinger and Young-Oh Kim (2010), "Probabilities for Ensemble
+  Forecasts Reflecting Climate Information".
+  https://doi.org/10.1016/j.jhydrol.2010.06.038
+  Core component: density-ratio weights; normal-score density and optional
+  category recalibration are package variants, defined in conditioning.py.
+
+Scientific references identify method sources, not software authorship, which
+is recorded separately in package metadata and copyright notices.
 """
 from __future__ import annotations
 
@@ -16,6 +58,11 @@ from .data import prepare_probabilities, seasonal_cube, season_dates
 
 def schaake_shuffle(ensemble, template, axis: int = 0, ties: str = "stable", rng=None):
     """Reorder ensemble values to the ranks of a same-sized historical template.
+
+    Clark, Gangopadhyay, Hay, Rajagopalan and Wilby (2004b), DOI
+    10.1175/1525-7541(2004)005<0243:TSSAMF>2.0.CO;2. This implements the
+    permutation core; it does not reproduce the publication's forecast models
+    or station experiments. See the module References for the complete source.
 
     Every non-ensemble coordinate (day, variable, site) is treated as one column.
     Columns keep their exact empirical marginals. To impose temporal dependence,
@@ -74,6 +121,11 @@ def enso_rank_weights(index, target: float, strength: float = 1.0,
                       selection: float = 1.0) -> np.ndarray:
     """Selection weights from ranked absolute distance to a scalar climate index.
 
+    Clark, Gangopadhyay, Brandon, Werner, Hay, Rajagopalan and Yates (2004a),
+    Eq. (9), DOI 10.1029/2003WR002747, building on Yates et al. (2003), DOI
+    10.1029/2002WR001769; see full authors/titles in the module References.
+    This is the rank-selection component, not the complete Yates kNN generator.
+
     This explicitly implements the rank-selection rule
     ``rank = floor(N * U**strength / selection) + 1``, with U uniform on [0,1).
     Probabilities are integrated analytically, without Monte Carlo error.
@@ -113,6 +165,10 @@ def enso_rank_weights(index, target: float, strength: float = 1.0,
 class ForecastAnalogGenerator:
     """Sample complete observed seasons using shared regional donor weights.
 
+    This is a package baseline based on the Briggs--Wilks historical weighting
+    identity (1996), not the daily kNN algorithm of Apipattanavis et al. (2007)
+    or the daily marginal resampling/Schaake algorithm of Clark et al. (2004a).
+
     Local year weights p(category)/N(category) are averaged over forecast-valid
     sites, using cos(latitude) area weights by default. The resulting probability
     distribution is shared by the full field. ``diagnostics_`` quantifies its
@@ -130,23 +186,37 @@ class ForecastAnalogGenerator:
         self.area_weighted = bool(area_weighted)
 
     def fit(self, observations: xr.Dataset, probabilities: xr.DataArray,
-            year_prior: xr.DataArray | None = None, constraints=None, constraint_method="mre"):
+            year_prior: xr.DataArray | None = None, constraints=None, constraint_method="mre",
+            constraint_mode="soft", _regional_constraints=True):
         """Fit regional analog weights; optional prior has dimension season_year.
 
         ``constraints`` (list of SeasonalConstraint) replaces the p/N local
-        weights by minimum-relative-entropy (or Croley) weights that honour all
-        constraints; the seasonal total with ``probabilities`` is added unless
+        weights by minimum-relative-entropy (or Croley-inspired) weights that
+        target the supplied constraints in the selected exact or soft mode;
+        the seasonal total with ``probabilities`` is added unless
         a constraint already uses the main forecast (``probabilities=None``).
 
-        A supplied prior multiplies the forecast-conditioned weights. Therefore
-        it also changes the expected tercile frequencies; diagnostics are always
-        recalculated after applying it. A prior can be built by enso_rank_weights.
+        With ``constraints``, the prior is the reference distribution *inside*
+        the constrained optimization. Without constraints it multiplies the
+        forecast-conditioned donor weights. ``constraint_mode='exact'`` enforces
+        feasible constraint probabilities; the default ``'soft'`` retains the
+        original tolerance-penalized objective. Diagnostics describe final
+        weights actually used for sampling. A prior can be built by
+        enso_rank_weights.
         """
         if "PRCP" not in observations:
             raise ValueError("observations must include PRCP")
         self.cube_ = seasonal_cube(observations, months=self.months)
         self.probabilities_ = prepare_probabilities(probabilities, target=observations)
         years = np.asarray(self.cube_.season_year.values)
+        if year_prior is not None:
+            if not isinstance(year_prior, xr.DataArray) or year_prior.dims != ("season_year",):
+                raise ValueError("year_prior must be a DataArray with dimension season_year")
+            prior = np.asarray(year_prior.sel(season_year=years).values, dtype=float)
+            if not np.isfinite(prior).all() or np.any(prior < 0):
+                raise ValueError("year_prior must be finite and nonnegative")
+        else:
+            prior = None
         totals = self.cube_.PRCP.sum("day", skipna=False).transpose("season_year", "Y", "X")
         ny, nx = totals.sizes["Y"], totals.sizes["X"]
         values = np.asarray(totals.values).reshape(len(years), -1)
@@ -155,8 +225,14 @@ class ForecastAnalogGenerator:
         p = self.probabilities_.transpose("probability", "Y", "X").values.reshape(3, -1)
         local_weights, flags = year_weights(categories, p)
         if constraints:
+            # One coherent donor field optimizes regional constraints. Requiring
+            # every local target to be feasible first would reject a feasible
+            # regional problem. The preliminary local weights are diagnostic.
+            local_mode = ("soft" if _regional_constraints and constraint_mode == "exact"
+                          else constraint_mode)
             local_weights, flags = self._constrained(observations, years, values, p, constraints,
-                                                     constraint_method, (ny, nx))
+                                                     constraint_method, (ny, nx), prior,
+                                                     local_mode)
         usable = np.isfinite(p).all(axis=0) & (local_weights.sum(axis=0) > 0)
         if not usable.any():
             raise ValueError("No forecast-valid grid cells have classified historical seasons")
@@ -170,17 +246,12 @@ class ForecastAnalogGenerator:
         if site_area.sum() <= 0:
             raise ValueError("No positive-area forecast-valid sites")
         weights = np.sum(local_weights * site_area[None, :], axis=1) / site_area.sum()
-        if constraints:
-            weights = self._regional_constrained(site_area)
-        if year_prior is not None:
-            if not isinstance(year_prior, xr.DataArray) or year_prior.dims != ("season_year",):
-                raise ValueError("year_prior must be a DataArray with dimension season_year")
-            prior = year_prior.sel(season_year=years).values
-            if not np.isfinite(prior).all() or np.any(prior < 0):
-                raise ValueError("year_prior must be finite and nonnegative")
+        if constraints and _regional_constraints:
+            weights = self._regional_constrained(site_area, prior, constraint_mode)
+        if prior is not None and not constraints:
             weights *= prior
         if weights.sum() <= 0:
-            raise ValueError("The combined donor weights have no positive mass")
+            raise ValueError("The combined donor weights have no positive donor mass")
         weights = weights / weights.sum()
         coords = {"Y": totals.Y, "X": totals.X}
         self.weights_ = xr.DataArray(weights, dims="season_year", coords={"season_year": years}, name="donor_weight")
@@ -207,9 +278,31 @@ class ForecastAnalogGenerator:
         }, attrs={"method": "area-average of local donor probabilities; shared whole-season donor",
                   "limitation": "Heterogeneous gridded tercile probabilities generally cannot all be reproduced exactly.",
                   "effective_donor_years": float(1 / np.sum(weights ** 2))})
+        if constraints and _regional_constraints:
+            info = self._cinfo[0]
+            shared = np.stack([
+                np.stack([(weights[:, None] * (info["categories"][name] == k)).sum(axis=0)
+                          for k in range(3)]).reshape(3, ny, nx)
+                for name in info["names"]])
+            self.constraint_info_["shared_donor_achieved_probability"] = (
+                ("constraint", "probability", "Y", "X"), shared)
+            self.constraint_info_["per_site_optimized_probability"] = (
+                self.constraint_info_["achieved_probability"].copy())
+            self.constraint_info_["per_site_effective_years"] = (
+                self.constraint_info_["effective_years"].copy())
+            self.constraint_info_["achieved_probability"] = (
+                ("constraint", "probability", "Y", "X"), shared)
+            self.constraint_info_["effective_years"] = (
+                ("Y", "X"), np.full((ny, nx), 1 / np.sum(weights ** 2)))
+            self.constraint_info_.attrs["achieved_probability_definition"] = (
+                "achieved_probability and shared_donor_achieved_probability describe "
+                "the shared donors actually sampled; per_site_optimized_probability "
+                "describes the preliminary local optimization")
+            self.constraint_info_.attrs["regional_constraint_mode"] = constraint_mode
         return self
 
-    def _constrained(self, observations, years, totals, p, constraints, method, shape):
+    def _constrained(self, observations, years, totals, p, constraints, method, shape,
+                     prior, constraint_mode):
         from .mre import constrained_year_weights, relabel_probabilities, thresholds_for
         names = [con.name for con in constraints]
         if len(set(names)) != len(names):
@@ -233,7 +326,8 @@ class ForecastAnalogGenerator:
             primary = "total" if "total" not in values else "forecast_total"
             values[primary], probs[primary], tols[primary] = totals, p, 0.01
         weights, flags, info = constrained_year_weights(values, probs, years, climatology=self.climatology,
-                                                        tolerances=tols, method=method,
+                                                        prior=prior, tolerances=tols, method=method,
+                                                        constraint_mode=constraint_mode,
                                                         tercile_method=self.tercile_method, thresholds=thr_fixed)
         self._cinfo = (info, probs, tols, method)
         coords = {"constraint": info["names"], "probability": ["PB", "PN", "PA"],
@@ -244,11 +338,12 @@ class ForecastAnalogGenerator:
             "achieved_probability": (("constraint", "probability", "Y", "X"),
                                      np.stack([info["achieved_probability"][k].reshape(3, *shape) for k in info["names"]])),
             "effective_years": (("Y", "X"), info["effective_years"].reshape(shape))},
-            coords=coords, attrs={"method": method, "primary_constraint": primary})
+            coords=coords, attrs={"method": method, "primary_constraint": primary,
+                                 "constraint_mode": constraint_mode})
         return weights, flags
 
-    def _regional_constrained(self, site_area):
-        """One shared donor distribution meeting the AREA-MEAN constraints exactly.
+    def _regional_constrained(self, site_area, prior, constraint_mode):
+        """One shared donor distribution fitted to AREA-MEAN constraints.
 
         Features are area-weighted fractions of cells in each class for every
         year; targets are area-weighted forecast probabilities. Averaging the
@@ -262,14 +357,19 @@ class ForecastAnalogGenerator:
         for name in info["names"]:
             c = info["categories"][name]
             valid &= (c[:, a > 0] >= 0).all(axis=1)
-            for k in (0, 2):
+            for k in range(3):
                 feats.append(((c == k) * a).sum(1))
                 targets.append(float(np.nansum(probs[name][k] * a)))
                 taus.append(tols[name])
         if not valid.any():
             raise ValueError("No donor season has complete constrained attributes across the forecast-valid region")
         g = np.stack(feats, -1)[:, None, :]
-        w, rinfo = solve_weights(g, np.asarray(targets)[None], valid[:, None].astype(float), np.asarray(taus), method=method)
+        regional_prior = valid.astype(float) * (prior if prior is not None else 1.)
+        if regional_prior.sum() <= 0:
+            raise ValueError("No complete regional donor has positive year_prior support")
+        w, rinfo = solve_weights(g, np.asarray(targets)[None], regional_prior[:, None],
+                                 np.asarray(taus), method=method,
+                                 constraint_mode=constraint_mode)
         self.constraint_info_.attrs["regional_effective_years"] = float(rinfo["effective_years"][0])
         self.constraint_info_.attrs["regional_achieved_minus_target_max"] = float(np.max(np.abs(rinfo["achieved"][0] - np.asarray(targets))))
         return w[:, 0]
@@ -299,17 +399,27 @@ class ForecastAnalogGenerator:
 
 
 class ForecastSchaakeGenerator(ForecastAnalogGenerator):
-    """Clark et al. (2004a) forecast-weighted resampling with coherent Schaake ranks.
+    """Clark et al. (2004a)-inspired resampling with coherent Schaake ranks.
+
+    DOI 10.1029/2003WR002747; complete authors and title are in the module
+    References. The daily marginal-resampling and rank-permutation cores are
+    implemented; the template convention below is a calendar-aligned variant.
+    The authors' station experiments and RPSS parameter optimization are not
+    reproduced by this class.
 
     At each cell/day/member, a year is drawn from that cell's forecast-conditioned
     year weights (p/N, or Stedinger–Kim pdf-ratio, optionally multiplied by a
-    ``year_prior`` such as :func:`enso_rank_weights`, which is Clark's Yates
-    rank selection), then a day uniformly within +/- ``window`` seasonal positions
+    ``year_prior`` such as :func:`enso_rank_weights`, implementing Clark's
+    rank-selection component), then a day uniformly within +/- ``window`` seasonal positions
     (truncated at season boundaries). Every variable's marginal ensemble is then
     reordered to common historical-year templates that advance together through
     the season, which restores spatial, temporal and inter-variable rank
-    dependence. After reordering, TMIN<=TMAX and HUMIN<=HUMAX are enforced by
-    swapping (counts in ``attrs``).
+    dependence from those templates, subject to ties. These templates use the
+    same seasonal day as the target; unlike Clark's original date selection,
+    their initial dates do not have random +/- ``window`` offsets.
+    After reordering, TMIN<=TMAX and HUMIN<=HUMAX are enforced by
+    swapping (counts in ``attrs``). Those physical swaps may change the sorted
+    marginals after shuffling, so inspect the reported counts when validating.
 
     Templates are distinct years when ``n_members`` does not exceed the number of
     complete template years; otherwise they are drawn with replacement (reported).
@@ -319,7 +429,7 @@ class ForecastSchaakeGenerator(ForecastAnalogGenerator):
 
     def __init__(self, months=(7, 8, 9), climatology=(1991, 2020),
                  tercile_method="empirical", seed=42, window=7, weighting="tercile", ties="random",
-                 template_years="uniform"):
+                 template_years="uniform", pdf_ratio_calibrate=True):
         super().__init__(months, climatology, tercile_method, seed)
         if not isinstance(window, (int, np.integer)) or window < 0:
             raise ValueError("window must be a nonnegative integer")
@@ -331,13 +441,17 @@ class ForecastSchaakeGenerator(ForecastAnalogGenerator):
             raise ValueError("template_years must be 'uniform' or 'weighted'")
         self.window, self.weighting, self.ties = int(window), weighting, ties
         self.template_years = template_years
+        self.pdf_ratio_calibrate = bool(pdf_ratio_calibrate)
 
     def fit(self, observations: xr.Dataset, probabilities: xr.DataArray,
-            year_prior: xr.DataArray | None = None, constraints=None, constraint_method="mre"):
+            year_prior: xr.DataArray | None = None, constraints=None, constraint_method="mre",
+            constraint_mode="soft"):
         """``constraints``: see :meth:`ForecastAnalogGenerator.fit`. The day-to-day
         sequencing (onset, dry spells) comes from the Schaake templates, so use
         ``template_years='weighted'`` when such constraints matter."""
-        super().fit(observations, probabilities, constraints=constraints, constraint_method=constraint_method)
+        super().fit(observations, probabilities, year_prior=year_prior,
+                    constraints=constraints, constraint_method=constraint_method,
+                    constraint_mode=constraint_mode, _regional_constraints=False)
         self.variables_ = ["PRCP"] + [v for v in self.cube_.data_vars if v != "PRCP"]
         years = np.asarray(self.cube_.season_year.values)
         nyears = len(years)
@@ -351,20 +465,50 @@ class ForecastSchaakeGenerator(ForecastAnalogGenerator):
             cats, _ = classify_seasons(totals, years, climatology=self.climatology, method=self.tercile_method)
             z = normal_scores(totals, years, climatology=self.climatology, method=self.tercile_method)
             p = self.probabilities_.transpose("probability", "Y", "X").values.reshape(3, -1)
-            local, _ = tercile_pdf_ratio_weights(z, cats, p)
-        if year_prior is not None:
-            if not isinstance(year_prior, xr.DataArray) or year_prior.dims != ("season_year",):
-                raise ValueError("year_prior must be a DataArray with dimension season_year")
-            prior = year_prior.sel(season_year=years).values
-            if not np.isfinite(prior).all() or np.any(prior < 0):
-                raise ValueError("year_prior must be finite and nonnegative")
-            local = local * prior[:, None]
+            local, flags = tercile_pdf_ratio_weights(z, cats, p,
+                                                       calibrate=self.pdf_ratio_calibrate)
+            self.diagnostics_["conditioning_flag"] = (("Y", "X"),
+                flags.reshape(self.cube_.sizes["Y"], self.cube_.sizes["X"]))
+        if year_prior is not None and not constraints:
+            local = local * year_prior.sel(season_year=years).values[:, None]
         total = local.sum(axis=0)
         self._local = np.divide(local, total, out=np.zeros_like(local), where=total > 0)
         active = self.valid_mask_.values.ravel() & (total > 0)
         if not active.any():
             raise ValueError("The prior leaves no forecast-valid site with positive donor mass")
         self._active = active
+        ny, nx = self.cube_.sizes["Y"], self.cube_.sizes["X"]
+        self.valid_mask_ = self.valid_mask_.copy(data=active.reshape(ny, nx))
+        self.local_weights_ = self.local_weights_.copy(data=self._local.reshape(nyears, ny, nx))
+        rain_totals = self.cube_.PRCP.sum("day", skipna=False).values.reshape(nyears, -1)
+        donor_categories, _ = classify_seasons(
+            rain_totals, years, climatology=self.climatology, method=self.tercile_method)
+        donor_probability = np.stack([
+            np.sum(self._local * (donor_categories == c), axis=0) for c in range(3)])
+        donor_probability[:, ~active] = np.nan
+        self.diagnostics_["daily_donor_category_probability"] = (
+            ("probability", "Y", "X"), donor_probability.reshape(3, ny, nx))
+        self.diagnostics_["daily_donor_category_probability_error"] = (
+            self.diagnostics_["daily_donor_category_probability"] - self.probabilities_)
+        self.diagnostics_["daily_donor_effective_years"] = (
+            ("Y", "X"), np.divide(1., np.sum(self._local ** 2, axis=0),
+                                    out=np.full(ny * nx, np.nan), where=active).reshape(ny, nx))
+        latitude = np.asarray(self.cube_.Y.values, dtype=float)
+        site_area = (np.broadcast_to(np.cos(np.deg2rad(latitude))[:, None], (ny, nx)).ravel()
+                     if self.area_weighted else np.ones(ny * nx))
+        site_area = np.clip(site_area, 0., None)
+        site_area[~active] = 0.
+        if site_area.sum() <= 0:
+            raise ValueError("No positive-area forecast-valid sites remain after applying the prior")
+        donor_weights = (self._local * site_area[None, :]).sum(axis=1) / site_area.sum()
+        self.weights_ = self.weights_.copy(data=donor_weights)
+        self.diagnostics_.attrs["effective_donor_years"] = float(1 / np.sum(donor_weights ** 2))
+        if constraints:
+            self.constraint_info_.attrs.pop("regional_effective_years", None)
+            self.constraint_info_.attrs.pop("regional_achieved_minus_target_max", None)
+            self.constraint_info_.attrs["achieved_probability_definition"] = (
+                "per-site donor weights used for daily marginal resampling; "
+                "generated seasonal attributes may differ after the Schaake shuffle")
         complete = np.ones(nyears, dtype=bool)
         for v in self.variables_:
             complete &= np.isfinite(self._values[v][:, :, active]).all(axis=(1, 2))
@@ -378,6 +522,7 @@ class ForecastSchaakeGenerator(ForecastAnalogGenerator):
         self.diagnostics_.attrs.update({
             "method": "Clark et al. (2004a): local forecast-weighted daily resampling + advancing common-year Schaake templates",
             "template_year_count": int(len(self._template_indices)), "weighting": self.weighting,
+            "pdf_ratio_calibrate": self.pdf_ratio_calibrate,
             "year_prior": "applied" if year_prior is not None else "none",
             "limitation": "Seasonal tercile probabilities are approximate; assess generated seasonal totals.",
             "window_days": self.window})

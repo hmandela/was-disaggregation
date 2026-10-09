@@ -1,34 +1,76 @@
-"""Downscaling the dynamical forecast directly: no tercile step (0.5.0).
+"""Daily dynamical-ensemble downscaling and dependence restoration.
 
-The tercile forecast discards what the dynamical model says about the daily
-sequence: onset, dry spells, intraseasonal variability. This module works from
-the model's daily ensemble instead (e.g. C3S / SEAS5 daily precipitation):
+This module implements identifiable mathematical components from the references
+below, together with explicitly named package variants. It does not reproduce
+the articles' original datasets, fitted parameters or evaluation experiments.
 
-1. **Daily bias correction** (``DailyBiasCorrector``): per cell and calendar
-   month, pooled over hindcast years and members,
-   * ``"qm"``: empirical quantile mapping (Panofsky & Brier; Gudmundsson et al. 2012),
-   * ``"loci_qm"``: local intensity scaling of the wet-day threshold (Schmidli
-     et al. 2006), then quantile mapping of wet-day amounts,
-   * any external object with ``fit``/``transform`` (e.g. ``WAS_MC_QM`` or
-     ``WAS_MC_LOCI`` from ``was_markov_chain_bc``) via ``ExternalCorrector``.
-2. **Non-homogeneous hidden Markov model** (``NHMM``; Hughes & Guttorp 1994;
-   Robertson et al. 2004). Hidden daily weather states, with transitions
-   driven by model predictors, emit multi-site occurrence and amounts. A
-   stochastic downscaling route from daily model predictors. ``NHSMM`` (0.6.0)
-   is the hidden semi-Markov version: explicit, predictor-dependent state
-   durations, so long dry regimes are not cut short by geometric dwell times.
-3. **Space-time dependence restoration** of calibrated marginals:
-   * ``ensemble_copula_coupling`` (ECC-Q / ECC-R; Schefzik et al. 2013): the
-     raw ensemble's rank structure,
-   * ``schaake_shuffle`` with random historical dates (Clark et al. 2004b), or
-     with **preferentially selected** dates whose observed trajectories resemble
-     the forecast (``preferential_dates``, after Scheuerer et al. 2017).
-4. ``DynamicalDownscaler`` chains them: correct, then pool a +/- window of
-   days into calibrated marginals, then couple.
+* ``DailyBiasCorrector`` implements empirical quantile mapping (QM) and the
+  wet-frequency/intensity LOCI mechanism of Schmidli, Frei and Vidale (2006).
+  ``loci_qm`` combines the two mechanisms; it is a package hybrid.
+* ``NHMM`` uses the predictor-dependent hidden-state framework of Hughes and
+  Guttorp (1994), with the occurrence-only transition/emission structure of
+  Robertson, Kirshner and Smyth (2004). Gamma amounts, spatial copulas and
+  predictor-dependent initialization are package extensions.
+* ``NHSMM`` uses an expanded state/age representation related to Langrock and
+  Zucchini (2011). Guédon (2003) is a foundational semi-Markov reference, not
+  the exact fitted algorithm here. The polynomial predictor-dependent hazard,
+  geometric tail and conditional initial-age distribution are package choices.
+* ``ensemble_copula_coupling`` implements ECC-Q and ECC-R from Schefzik,
+  Thorarinsdottir and Gneiting (2013). ``Q-midpoint`` and ``Q-mean`` explicitly
+  distinguish alternative marginal representatives from original ECC-Q.
+* Historical reordering uses Clark, Gangopadhyay, Hay, Rajagopalan and Wilby
+  (2004). ``minimum_divergence_selection`` implements the integrated-CDF
+  divergence and one-at-a-time backward elimination of Scheuerer, Hamill,
+  Whitin, He and Henkel (2017), using empirical predictive distributions.
+  ``preferential_dates`` is a separate forecast-mean analogue heuristic.
+* ``DynamicalDownscaler`` composes these components. ``synthetic_model_ensemble``
+  creates artificial inputs for demonstrations; it is not an operational model.
 
-``synthetic_model_ensemble`` builds an ARTIFICIAL biased "dynamical model"
-ensemble from observations. It exists only for demonstrations and tests, when
-no C3S files are at hand.
+Implemented safeguards include explicit ECC quantile conventions, interval
+censoring near the rainfall threshold, generalized-EM objective ascent checks,
+and an initial-age term in semi-Markov fitting. These improve mathematical or
+numerical consistency. They do not establish superior out-of-sample forecast
+skill. Remaining limits include tied-value wet-frequency errors, historical
+support and stationarity assumptions, greedy MDSS selection and model-dependent
+residual spatial calibration. See ``docs/MATH_DYNAMICAL_FR.md``.
+
+References
+----------
+Hughes, James P.; Guttorp, Peter (1994). A class of stochastic models for
+    relating synoptic atmospheric patterns to regional hydrologic phenomena.
+    Water Resources Research, 30, 1535-1546. https://doi.org/10.1029/93WR02983
+Robertson, Andrew W.; Kirshner, Sergey; Smyth, Padhraic (2004). Downscaling of
+    daily rainfall occurrence over Northeast Brazil using a hidden Markov model.
+    Journal of Climate, 17, 4407-4424. https://doi.org/10.1175/JCLI-3216.1
+Guédon, Yann (2003). Estimating hidden semi-Markov chains from discrete sequences.
+    Journal of Computational and Graphical Statistics, 12, 604-639.
+    https://doi.org/10.1198/1061860032030
+Langrock, Roland; Zucchini, Walter (2011). Hidden Markov models with arbitrary
+    state dwell-time distributions. Computational Statistics & Data Analysis,
+    55, 715-724. https://doi.org/10.1016/j.csda.2010.06.015
+Schmidli, Jürg; Frei, Christoph; Vidale, Pier Luigi (2006). Downscaling from GCM
+    precipitation: a benchmark for dynamical and statistical downscaling methods.
+    International Journal of Climatology, 26, 679-689.
+    https://doi.org/10.1002/joc.1287
+Gudmundsson, Lukas; Bremnes, John Bjørnar; Haugen, Jan Erik; Engen-Skaugen,
+    Torill (2012). Technical Note: Downscaling RCM precipitation to the station
+    scale using statistical transformations - a comparison of methods.
+    Hydrology and Earth System Sciences, 16, 3383-3390.
+    https://doi.org/10.5194/hess-16-3383-2012
+Clark, Martyn; Gangopadhyay, Subhrendu; Hay, Lauren; Rajagopalan, Balaji; Wilby,
+    Robert (2004). The Schaake shuffle: a method for reconstructing space-time
+    variability in forecasted precipitation and temperature fields.
+    Journal of Hydrometeorology, 5, 243-262.
+    https://doi.org/10.1175/1525-7541(2004)005<0243:TSSAMF>2.0.CO;2
+Schefzik, Roman; Thorarinsdottir, Thordis L.; Gneiting, Tilmann (2013).
+    Uncertainty quantification in complex simulation models using ensemble
+    copula coupling. Statistical Science, 28, 616-640.
+    https://doi.org/10.1214/13-STS443
+Scheuerer, Michael; Hamill, Thomas M.; Whitin, Brett; He, Minxue; Henkel,
+    Arthur (2017). A method for preferential selection of dates in the Schaake
+    shuffle approach to constructing spatiotemporal forecast fields of
+    temperature and precipitation. Water Resources Research, 53, 3029-3046.
+    https://doi.org/10.1002/2016WR020133
 """
 from __future__ import annotations
 
@@ -36,7 +78,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy.optimize import minimize
-from scipy.special import digamma, gammainc, gammaincinv, gammaln, logsumexp, polygamma
+from scipy.special import digamma, expit, gammainc, gammaincinv, gammaln, logsumexp
 
 from .data import (season_dates, validate_months, canonicalize_observations,
                    _validate_grid, _convert_units)
@@ -102,16 +144,32 @@ class DailyBiasCorrector:
     ``method="qm"``: F_obs^-1(F_mod(x)) on all days, using ``n_quantiles``
     probability levels with linear interpolation. The top level is extrapolated
     with the constant difference of the highest quantiles.
+    ``method="loci"``: the model threshold t_m is set so that the model
+    wet-day frequency approximates the observed frequency; rescale retained
+    model wet days by their mean to match observed mean wet-day intensity. This is
+    the local intensity scaling of Jürg Schmidli, Christoph Frei and Pier Luigi
+    Vidale (2006), https://doi.org/10.1002/joc.1287. Only their simplest
+    frequency/intensity mechanism is implemented; flow-dependent correction
+    and the Alpine experiment are not reproduced.
     ``method="loci_qm"``: the model threshold t_m is set so that the model
     wet-day frequency (x > t_m) approximates the observed frequency (x >= wet_threshold);
     model days <= t_m become dry (0), and wet-day amounts are quantile-mapped
-    onto observed wet-day amounts. Exact frequencies cannot generally be
-    obtained with a deterministic threshold when model values are tied.
+    onto observed wet-day amounts. If one or both wet-day calibration samples
+    have fewer than five observations, a positive intensity scale is used in
+    place of wet-day quantiles. Exact frequencies cannot generally be obtained
+    with a deterministic threshold when model values are tied.
+
+    QM follows the empirical-distribution transformation reviewed by Lukas
+    Gudmundsson, John Bjørnar Bremnes, Jan Erik Haugen and Torill Engen-Skaugen
+    (2012), https://doi.org/10.5194/hess-16-3383-2012. Quantile interpolation,
+    upper-tail offset extrapolation, sparse-sample fallback and the hybrid
+    ``loci_qm`` are implementation choices, not a unique algorithm from that
+    review. No preservation of an unobserved climate-change signal is assumed.
     """
 
     def __init__(self, method="loci_qm", wet_threshold=1.0, n_quantiles=200):
-        if method not in {"qm", "loci_qm"}:
-            raise ValueError("method must be 'qm' or 'loci_qm'")
+        if method not in {"qm", "loci", "loci_qm"}:
+            raise ValueError("method must be 'qm', 'loci' or 'loci_qm'")
         self.method, self.thr, self.nq = method, float(wet_threshold), int(n_quantiles)
         if not np.isfinite(self.thr) or self.thr <= 0 or self.nq < 2:
             raise ValueError("wet_threshold must be positive and finite; n_quantiles must be >= 2")
@@ -132,6 +190,7 @@ class DailyBiasCorrector:
         self.q_ = q
         self.mod_q_, self.obs_q_ = {}, {}
         self.mod_thr_ = {}
+        self.wet_scale_, self.loci_scale_, self.wet_fallback_ = {}, {}, {}
         self.valid_ = {}
         for m in self.months_:
             sel = month == m
@@ -157,6 +216,19 @@ class DailyBiasCorrector:
                 for s in range(ns):
                     mw = mod[s][np.isfinite(mod[s]) & (mod[s] > t_mod[s])]
                     ow = ob[s][np.isfinite(ob[s]) & (ob[s] >= self.thr)]
+                    # The hybrid QM fallback rescales excesses when there are
+                    # too few wet days to estimate a useful wet CDF.
+                    mean_excess = np.mean(mw - t_mod[s]) if mw.size else np.nan
+                    self.wet_fallback_.setdefault(m, np.full(ns, np.nan))[s] = (
+                        ow.mean() if ow.size else np.nan)
+                    self.wet_scale_.setdefault(m, np.full(ns, np.nan))[s] = (
+                        ow.mean() / mean_excess if ow.size and np.isfinite(mean_excess)
+                        and mean_excess > 1e-12 else np.nan)
+                    # LOCI scales the original retained precipitation, not
+                    # precipitation shifted by the occurrence cutoff.
+                    self.loci_scale_.setdefault(m, np.full(ns, np.nan))[s] = (
+                        ow.mean() / mw.mean() if ow.size and mw.size and mw.mean() > 1e-12
+                        else np.nan)
                     if mw.size >= 5 and ow.size >= 5:
                         mq[s], oq[s] = np.quantile(mw, q), np.quantile(ow, q)
                 self.mod_q_[m], self.obs_q_[m] = mq, oq
@@ -194,8 +266,18 @@ class DailyBiasCorrector:
                 out[..., sel, :] = np.maximum(self._map(x, self.mod_q_[m], self.obs_q_[m]), 0)
             else:
                 wet = x > self.mod_thr_[m]
-                y = self._map(x, self.mod_q_[m], self.obs_q_[m])
-                out[..., sel, :] = np.where(np.isfinite(x), np.where(wet, np.maximum(y, self.thr), 0.0), np.nan)
+                if self.method == "loci":
+                    y = x * self.loci_scale_[m]
+                    y = np.where(np.isfinite(self.loci_scale_[m]), y, self.wet_fallback_[m])
+                    y = np.maximum(y, 0.0)
+                else:
+                    y = self._map(x, self.mod_q_[m], self.obs_q_[m])
+                    sparse = ~np.isfinite(self.mod_q_[m]).all(1)
+                    fallback = (x - self.mod_thr_[m]) * self.wet_scale_[m]
+                    fallback = np.where(np.isfinite(self.wet_scale_[m]), fallback, self.wet_fallback_[m])
+                    y = np.where(sparse, fallback, y)
+                    y = np.maximum(y, self.thr)
+                out[..., sel, :] = np.where(np.isfinite(x), np.where(wet, y, 0.0), np.nan)
             out[..., sel, :] = np.where(self.valid_[m], out[..., sel, :], np.nan)
         return out
 
@@ -227,7 +309,8 @@ class ExternalCorrector:
 # 2. Non-homogeneous hidden Markov model
 # ---------------------------------------------------------------------------
 class NHMM:
-    """Multi-site NHMM for daily rainfall (Hughes & Guttorp 1994; Robertson et al. 2004).
+    """Multi-site rainfall NHMM after James P. Hughes and Peter Guttorp (1994)
+    and Andrew W. Robertson, Sergey Kirshner and Padhraic Smyth (2004).
 
     Hidden states S_t in {0..K-1}. Transition probabilities
     P(S_t = j | S_{t-1} = i, x_t) ∝ exp(A_ij + lambda_j . x_t), with state 0 as
@@ -243,16 +326,38 @@ class NHMM:
     numerical M-step for (A, lambda). Large-scale spatial coherence comes from
     the shared state; within-state spatial dependence is not modelled, which is
     the classical conditional-independence assumption.
+
+    ``initial_predictors=True`` fits a regularized multinomial logistic model
+    for the first-day state using the first-day predictors. The default uses
+    unconditional initial state probabilities, as in previous releases.
+    ``amount_resolution`` defines a left-censored interval for wet-day excess
+    observations near zero; simulated amounts are the continuous latent values.
+    Occurrence-only modeling (``amounts=False``) is the part corresponding to
+    Robertson, Kirshner and Smyth (2004), https://doi.org/10.1175/JCLI-3216.1.
+    Gamma amounts, Gaussian spatial kernels, interval censoring and regularized
+    predictor-dependent initialization are package extensions. The emissions
+    do not reproduce the autologistic spatial model of Hughes and Guttorp's
+    separate 1994 spatial-dependence article. Numerical fitting safeguards
+    check penalized objective ascent; they cannot rule out local optima or
+    state-label ambiguity. See module references for the original NHMM source,
+    https://doi.org/10.1029/93WR02983.
     """
 
-    def __init__(self, n_states=4, amounts=True, amount_predictor=-1, wet_threshold=1.0, n_iter=60, tol=1e-4, seed=0):
+    def __init__(self, n_states=4, amounts=True, amount_predictor=-1, wet_threshold=1.0, n_iter=60, tol=1e-4, seed=0,
+                 initial_predictors=False, initial_ridge=1.0, amount_resolution=0.01):
         self.K, self.amounts, self.thr = int(n_states), bool(amounts), float(wet_threshold)
         # index of the predictor scaling wet-day amounts (None: no amount predictor)
         self.amount_predictor = amount_predictor
         self._ai = 0 if amount_predictor is None else int(amount_predictor)
         self.n_iter, self.tol, self.seed = int(n_iter), float(tol), int(seed)
+        self.initial_predictors, self.initial_ridge = bool(initial_predictors), float(initial_ridge)
+        self.amount_resolution = float(amount_resolution)
         if self.K < 2 or self.n_iter < 1 or self.tol < 0 or not np.isfinite(self.thr) or self.thr <= 0:
             raise ValueError("n_states must be >= 2, n_iter positive, tol nonnegative and wet_threshold positive")
+        if not np.isfinite(self.initial_ridge) or self.initial_ridge < 0:
+            raise ValueError("initial_ridge must be nonnegative and finite")
+        if not np.isfinite(self.amount_resolution) or self.amount_resolution <= 0:
+            raise ValueError("amount_resolution must be positive and finite")
 
     def _validated_inputs(self, rain, predictors):
         rain, x = np.asarray(rain, float), np.asarray(predictors, float)
@@ -275,21 +380,62 @@ class NHMM:
         logits = self.A_[None, :, :] + (x @ self.lam_.T)[..., None, :]      # (..., T, K(from), K(to))
         return logits - logsumexp(logits, axis=-1, keepdims=True)
 
+    def _initial_probs(self, x0):
+        """State probabilities for the first day, (season, K)."""
+        x0 = np.asarray(x0, float)
+        if not self.initial_predictors:
+            return np.broadcast_to(self.pi0_, (len(x0), self.K))
+        design = np.column_stack([np.ones(len(x0)), x0])
+        logits = np.concatenate([np.zeros((len(x0), 1)), design @ self.initial_coef_], axis=1)
+        return np.exp(logits - logsumexp(logits, axis=1, keepdims=True))
+
+    def _fit_initial(self, posterior, x0):
+        """Regularized weighted logit on posterior first-day states."""
+        if not self.initial_predictors:
+            return
+        design = np.column_stack([np.ones(len(x0)), x0])
+        k = self.K
+        ridge = np.ones((design.shape[1], k - 1)) * self.initial_ridge
+        ridge[0] = 0.0
+
+        def nll(flat):
+            coef = flat.reshape(design.shape[1], k - 1)
+            logits = np.concatenate([np.zeros((len(x0), 1)), design @ coef], axis=1)
+            lp = logits - logsumexp(logits, axis=1, keepdims=True)
+            p = np.exp(lp)
+            loss = -(posterior * lp).sum() + 0.5 * (ridge * coef ** 2).sum()
+            grad = design.T @ (p[:, 1:] - posterior[:, 1:]) + ridge * coef
+            return loss, grad.ravel()
+
+        result = minimize(nll, self.initial_coef_.ravel(), jac=True, method="L-BFGS-B")
+        if not np.isfinite(result.fun):
+            raise RuntimeError("Conditional initial state fit failed")
+        self.initial_coef_ = result.x.reshape(design.shape[1], k - 1)
+
     def _log_emission(self, rain, x=None):
         """rain (Y, T, S), predictors (Y, T, q) -> (Y, T, K)."""
+        predictors = self._x if x is None else np.asarray(x, float)
         ok = np.isfinite(rain)
         wet = ok & (rain >= self.thr)
         lp, lq = np.log(self.p_), np.log1p(-self.p_)                            # (K, S)
         e = np.einsum("yts,ks->ytk", wet.astype(float), lp) + np.einsum("yts,ks->ytk", (ok & ~wet).astype(float), lq)
         if self.amounts:
-            x = np.where(wet, np.maximum(rain - self.thr, 0.01), 1.0)
+            excess = rain - self.thr
+            censored = wet & (excess <= self.amount_resolution)
+            x = np.where(wet, np.maximum(excess, self.amount_resolution), 1.0)
             xa = x
             k = self.shape_                                                       # (K, S)
             lth = np.log(self.scale_)[None, None]                                 # (1,1,K,S)
-            if self.amount_predictor is not None and self._x is not None:
-                lth = lth + (self.g_[None, None, :] * self._x[..., self._ai][..., None])[..., None]
+            if self.amount_predictor is not None and predictors is not None:
+                lth = lth + (self.g_[None, None, :] * predictors[..., self._ai][..., None])[..., None]
             logpdf = ((k[None, None] - 1) * np.log(xa)[..., None, :] - xa[..., None, :] * np.exp(-lth)
                       - gammaln(k)[None, None] - k[None, None] * lth)             # (Y,T,K,S)
+            # Threshold observations encode the interval [0, resolution] in
+            # latent wet-day excess; replacing zero by a tiny point density
+            # creates artificial likelihood singularities when shape < 1.
+            limit = self.amount_resolution * np.exp(-lth)
+            logcdf = np.log(np.maximum(gammainc(k[None, None], limit), 1e-300))
+            logpdf = np.where(censored[..., None, :], logcdf, logpdf)
             e = e + np.where(wet[..., None, :], logpdf, 0.0).sum(-1)
         return e
 
@@ -297,7 +443,8 @@ class NHMM:
         """le (Y,T,K), lt (Y,T,K,K) -> gamma (Y,T,K), xi (Y,T-1,K,K), loglik."""
         Y, T, K = le.shape
         la = np.zeros((Y, T, K))
-        la[:, 0] = np.log(self.pi0_)[None] + le[:, 0]
+        start = self._initial_probs(self._x[:, 0]) if self.initial_predictors else self.pi0_[None]
+        la[:, 0] = np.log(start) + le[:, 0]
         for t in range(1, T):
             la[:, t] = logsumexp(la[:, t - 1][:, :, None] + lt[:, t], axis=1) + le[:, t]
         lb = np.zeros((Y, T, K))
@@ -331,35 +478,96 @@ class NHMM:
         return rng
 
     def _m_step_emissions(self, g, rain, x):
-        """Occurrence and (predictor-scaled) Gamma amounts from state posteriors g (Y, T, K)."""
+        """Weighted Bernoulli MLE and bounded Gamma generalized M-step.
+
+        Optimize the complete weighted amount log-likelihood jointly over
+        each state's site parameters and its common predictor coefficient.
+        Sites with no expected wet observations keep their previous parameters.
+        """
         ok = np.isfinite(rain)
         pos = ok & (rain >= self.thr)
-        wet = pos.astype(float)
         w_ok = np.einsum("ytk,yts->ks", g, ok.astype(float))
-        self.p_ = np.clip(np.einsum("ytk,yts->ks", g, wet) / np.maximum(w_ok, 1e-9), 1e-3, 1 - 1e-3)
+        self.p_ = np.clip(np.einsum("ytk,yts->ks", g, pos.astype(float)) /
+                          np.maximum(w_ok, 1e-12), 1e-3, 1 - 1e-3)
         if not self.amounts:
             return
-        xw = np.where(pos, np.maximum(rain - self.thr, 0.01), 1.0)
-        w = np.einsum("ytk,yts->ytks", g, pos.astype(float))
-        sw = w.sum((0, 1))
-        x1 = x[..., self._ai][..., None] if self.amount_predictor is not None else np.zeros(x.shape[:2] + (1,))
-        for _ in range(3):                                           # alternate (k, theta) and g
-            adj = xw[:, :, None, :] * np.exp(-self.g_[None, None, :, None] * x1[..., None])  # x e^{-g x_t}
-            mean = (w * adj).sum((0, 1)) / np.maximum(sw, 1e-9)
-            mlog = (w * np.log(adj)).sum((0, 1)) / np.maximum(sw, 1e-9)
-            s_ = np.clip(np.log(np.maximum(mean, 1e-6)) - mlog, 1e-4, None)
-            k = (3 - s_ + np.sqrt((s_ - 3) ** 2 + 24 * s_)) / (12 * s_)
-            for _ in range(10):
-                k = np.maximum(k - (np.log(k) - digamma(k) - s_) / (1 / k - polygamma(1, k)), 1e-3)
-            self.shape_, self.scale_ = k, np.maximum(mean, 1e-3) / k
-            if self.amount_predictor is None:
-                break
-            # Newton step for g_k: d/dg sum w [-k (log th + g x) - x e^{-g x}/th]
-            xt = x1[..., None]                                           # (Y,T,1,1)
-            e = xw[:, :, None, :] * np.exp(-self.g_[None, None, :, None] * xt) / self.scale_[None, None]
-            grad = (w * (-self.shape_[None, None] * xt + e * xt)).sum((0, 1, 3))
-            hess = -(w * e * xt ** 2).sum((0, 1, 3))
-            self.g_ = np.clip(self.g_ - grad / np.minimum(hess, -1e-9), -3, 3)
+        censored = pos & (rain - self.thr <= self.amount_resolution)
+        z = np.where(pos, np.maximum(rain - self.thr, self.amount_resolution), 1.0)
+        predictor = x[..., self._ai] if self.amount_predictor is not None else np.zeros(x.shape[:2])
+        for state in range(self.K):
+            weights = g[..., state, None] * pos
+            active = weights.sum((0, 1)) > 1e-10
+            if not active.any():
+                continue
+            w, amount = weights[..., active], z[..., active]
+            interval = censored[..., active]
+            log_amount = np.log(amount)
+            ns = int(active.sum())
+            coef = self.g_[state] if self.amount_predictor is not None else 0.0
+            theta0 = np.r_[np.log(self.shape_[state, active]),
+                           np.log(self.scale_[state, active]), coef]
+
+            def objective(theta):
+                shape, scale = np.exp(theta[:ns]), np.exp(theta[ns:2 * ns])
+                log_scale = np.log(scale)[None, None] + theta[-1] * predictor[..., None]
+                ratio = amount * np.exp(-log_scale)
+                lp = ((shape - 1) * log_amount - ratio - gammaln(shape) - shape * log_scale)
+                shape_score = shape * (log_amount - log_scale - digamma(shape))
+                scale_score = ratio - shape
+                if interval.any():
+                    upper = self.amount_resolution * np.exp(-log_scale)
+                    logcdf = np.log(np.maximum(gammainc(shape, upper), 1e-300))
+                    relative_step = 1e-5
+                    cdf_plus = np.log(np.maximum(gammainc(shape * (1 + relative_step), upper), 1e-300))
+                    cdf_minus = np.log(np.maximum(gammainc(shape * (1 - relative_step), upper), 1e-300))
+                    shape_score = np.where(interval, (cdf_plus - cdf_minus) / (2 * relative_step), shape_score)
+                    density_ratio = np.exp(shape * np.log(upper) - upper - gammaln(shape) - logcdf)
+                    scale_score = np.where(interval, -density_ratio, scale_score)
+                    lp = np.where(interval, logcdf, lp)
+                shape_gradient = (w * shape_score).sum((0, 1))
+                scale_gradient = (w * scale_score).sum((0, 1))
+                coef_gradient = (w * scale_score * predictor[..., None]).sum()
+                return -float((w * lp).sum()), -np.r_[shape_gradient, scale_gradient, coef_gradient]
+
+            bounds = [(np.log(1e-3), np.log(1e3))] * ns + [(np.log(1e-6), np.log(1e6))] * ns
+            bounds += [(-3.0, 3.0) if self.amount_predictor is not None else (0.0, 0.0)]
+            result = minimize(objective, theta0, method="L-BFGS-B", jac=True, bounds=bounds)
+            if np.isfinite(result.fun) and result.fun <= objective(theta0)[0] + 1e-8:
+                self.shape_[state, active] = np.exp(result.x[:ns])
+                self.scale_[state, active] = np.exp(result.x[ns:2 * ns])
+                self.g_[state] = result.x[-1]
+
+    def _parameter_names(self):
+        return ("A_", "lam_", "pi0_", "initial_coef_", "p_", "shape_", "scale_", "g_")
+
+    def _penalty(self):
+        if self.initial_predictors:
+            return 0.5 * self.initial_ridge * float((self.initial_coef_[1:] ** 2).sum())
+        return 0.0
+
+    def _observed_loglik(self, rain, x):
+        self._x = x
+        return self._forward_backward(self._log_emission(rain, x), self._trans(x))[-1]
+
+    def _accept_m_step(self, previous, rain, x, old_objective):
+        """Safeguard generalized EM against numerical optimizer decreases.
+
+        Penalized likelihood, not raw likelihood, is the ascent criterion when
+        an explicit ridge prior is enabled. Convex parameter interpolation
+        preserves probability normalization and the parameter bounds.
+        """
+        candidate = {name: getattr(self, name).copy() for name in previous}
+        factor = 1.0
+        for _ in range(24):
+            score = self._observed_loglik(rain, x) - self._penalty()
+            if np.isfinite(score) and score >= old_objective - 1e-8:
+                return score
+            factor *= 0.5
+            for name, old in previous.items():
+                setattr(self, name, old + factor * (candidate[name] - old))
+        for name, old in previous.items():
+            setattr(self, name, old)
+        return old_objective
 
     def fit(self, rain, predictors):
         """rain (Y, T, S) observed daily seasons; predictors (Y, T, q)."""
@@ -369,18 +577,24 @@ class NHMM:
         K = self.K
         rng = self._init_emissions(rain, x)
         self.A_ = np.zeros((K, K)); self.A_[:, 1:] = rng.normal(0, 0.1, (K, K - 1))
-        self.A_ += np.eye(K) * 1.5                                              # persistence prior start
+        self.A_ += np.eye(K) * 1.5                                              # persistent initial guess, not a prior
         self.A_[:, 0] = 0.0
         self.lam_ = np.zeros((K, q))
         self.pi0_ = np.full(K, 1.0 / K)
+        self.initial_coef_ = np.zeros((q + 1, K - 1))
         prev = -np.inf
         self.loglik_ = []
+        self.objective_ = []
         for it in range(self.n_iter):
             lt = self._trans(x)
             self._x = x
             g, xi, ll = self._forward_backward(self._log_emission(rain), lt)
             self.loglik_.append(ll)
+            old_objective = ll - self._penalty()
+            self.objective_.append(old_objective)
+            previous = {name: getattr(self, name).copy() for name in self._parameter_names()}
             self.pi0_ = np.clip(g[:, 0].mean(0), 1e-6, None); self.pi0_ /= self.pi0_.sum()
+            self._fit_initial(g[:, 0], x[:, 0])
             self._m_step_emissions(g, rain, x)
             # transition parameters: maximise sum xi log P
             gprev = g[:, :-1]                                                   # (Y,T-1,K)
@@ -402,6 +616,7 @@ class NHMM:
             res = minimize(nll, theta0, jac=True, method="L-BFGS-B")
             self.A_[:, 1:] = res.x[:K * (K - 1)].reshape(K, K - 1)
             self.lam_[1:] = res.x[K * (K - 1):].reshape(K - 1, q)
+            self._accept_m_step(previous, rain, x, old_objective)
             if abs(ll - prev) < self.tol * abs(ll):
                 break
             prev = ll
@@ -411,7 +626,21 @@ class NHMM:
         self._x = x
         self.gamma_, _, final_ll = self._forward_backward(self._log_emission(rain), self._trans(x))
         self.loglik_.append(final_ll)
+        self.objective_.append(final_ll - self._penalty())
         return self
+
+    def loglik(self, rain, predictors):
+        """Observed-data log-likelihood of complete seasons, marginalizing states.
+
+        Includes occurrence and fitted amounts; excludes explicit ridge priors.
+        All finite observation values are conditioned on the supplied predictors.
+        """
+        if not hasattr(self, "p_"):
+            raise RuntimeError("Call fit before loglik")
+        rain, x = self._validated_inputs(rain, predictors)
+        if rain.shape[-1] != self.p_.shape[1] or x.shape[-1] != self.lam_.shape[-1]:
+            raise ValueError("rain sites and predictor count must match the fitted model")
+        return self._observed_loglik(rain, x)
 
     def viterbi(self, rain, predictors):
         """Most likely state sequence (Y, T)."""
@@ -419,7 +648,7 @@ class NHMM:
         le = self._log_emission(np.asarray(rain, float))
         lt = self._trans(self._x)
         Y, T, K = le.shape
-        d = np.log(self.pi0_)[None] + le[:, 0]
+        d = np.log(self._initial_probs(self._x[:, 0])) + le[:, 0]
         back = np.zeros((Y, T, K), dtype=int)
         for t in range(1, T):
             cand = d[:, :, None] + lt[:, t]
@@ -445,7 +674,11 @@ class NHMM:
         use = mixed.any(1)[states] if mixed.any() else np.ones(states.shape, bool)
         occ = np.where(np.isfinite(rain) & use[..., None], (rain >= self.thr).astype(float), np.nan).reshape(-1, rain.shape[-1])
         wet = np.isfinite(rain) & (rain >= self.thr)
-        amt = np.where(wet, (rain - self.thr) / self.scale_[states], np.nan).reshape(-1, rain.shape[-1])
+        amount_scale = self.scale_[states]
+        if self.amount_predictor is not None:
+            x = np.asarray(predictors, float)
+            amount_scale = amount_scale * np.exp(self.g_[states] * x[..., self._ai])[..., None]
+        amt = np.where(wet, (rain - self.thr) / amount_scale, np.nan).reshape(-1, rain.shape[-1])
         self.spatial_models_ = {
             "occurrence": fit_distance_model(occ, lat, lon, kind="power", transform="binary", max_pairs=max_pairs, seed=seed),
             "amount": fit_distance_model(amt, lat, lon, kind="exponential", transform="gaussian", max_pairs=max_pairs, seed=seed)}
@@ -457,7 +690,8 @@ class NHMM:
         M, T, _ = x.shape
         P = np.exp(self._trans(x))                                             # (M,T,K,K)
         states = np.zeros((M, T), dtype=int)
-        states[:, 0] = rng.choice(self.K, size=M, p=self.pi0_)
+        p0 = self._initial_probs(x[:, 0])
+        states[:, 0] = (rng.random((M, 1)) > np.cumsum(p0, axis=1)).sum(1).clip(max=self.K - 1)
         for t in range(1, T):
             cp = np.cumsum(P[np.arange(M), t, states[:, t - 1]], axis=1)
             states[:, t] = (rng.random((M, 1)) > cp).sum(1).clip(max=self.K - 1)
@@ -523,10 +757,11 @@ class NHMM:
 class NHSMM(NHMM):
     """Non-homogeneous hidden semi-Markov model (explicit-duration NHMM).
 
-    The first-order hidden chain of ``NHMM`` gives geometric state durations,
-    so long dry spells are too short. Here each state has its own dwell-time
-    distribution through a discrete hazard (Guédon 2003; Langrock & Zucchini
-    2011, hidden Markov representation of an HSMM with expanded states (k, d)):
+    The homogeneous first-order hidden chain gives geometric state durations.
+    This restriction can misrepresent persistence. Here each state has a dwell-time
+    distribution through a discrete hazard. The general semi-Markov framework
+    is described by Yann Guédon (2003); the expanded states (k, d) follow the
+    representation principle of Roland Langrock and Walter Zucchini (2011):
 
         P(leave k after d days | still in k, x_t)
             = h_k(d, x_t) = sigmoid(sum_p c_kp (log d / log D)^p + beta_k . x_t),
@@ -542,22 +777,31 @@ class NHSMM(NHMM):
 
     Fitted by EM on the expanded (K x D) chain (scaled forward-backward,
     vectorized over years). M-step: emissions as in ``NHMM``; hazards by
-    weighted logistic Newton steps per state (expected leave/stay counts);
+    weighted logistic L-BFGS-B steps per state (expected leave/stay counts
+    and the equilibrium initial-age term);
     destinations by weighted multinomial logit. ``init_iter`` NHMM iterations
     give the starting emissions and transitions. ``viterbi``, ``fit_spatial``,
     ``simulate`` and ``dwell_pmf`` work as for ``NHMM``.
-    Sansom & Thomson (2001) used an HSMM for rainfall in the same spirit.
 
-    The hazard update optimizes transition counts; it does not include the
-    hazard-dependent equilibrium initial-age term. With this initialization
-    the algorithm is an approximate EM procedure, and strict monotonicity of
-    the observed-data likelihood is not guaranteed.
+    The hazard M-step includes both transition counts and the equilibrium
+    initial-age contribution. Numerical generalized EM steps are safeguarded
+    by ascent of the penalized observed-data likelihood (``objective_``).
+    Conditional equilibrium at the first-day predictor is an explicit model
+    assumption; it does not imply a stationary non-homogeneous process.
+
+    References: Guédon (2003), https://doi.org/10.1198/1061860032030;
+    Langrock and Zucchini (2011), https://doi.org/10.1016/j.csda.2010.06.015.
+    The polynomial hazard, geometric right tail and fitting safeguards are
+    package extensions. This is not Guédon's original discrete-sequence
+    estimator or a reproduction of Langrock and Zucchini's rainfall experiment.
     """
 
     def __init__(self, n_states=4, max_duration=60, hazard_degree=2, hazard_predictors=True,
                  amounts=True, amount_predictor=-1, wet_threshold=1.0, n_iter=60, tol=1e-5,
-                 init_iter=15, ridge=0.1, seed=0):
-        super().__init__(n_states, amounts, amount_predictor, wet_threshold, n_iter, tol, seed)
+                 init_iter=15, ridge=0.1, seed=0, initial_predictors=False, initial_ridge=1.0,
+                 amount_resolution=0.01):
+        super().__init__(n_states, amounts, amount_predictor, wet_threshold, n_iter, tol, seed,
+                         initial_predictors, initial_ridge, amount_resolution)
         if self.K < 2:
             raise ValueError("NHSMM needs at least 2 states")
         self.D = int(max_duration)
@@ -574,13 +818,16 @@ class NHSMM(NHMM):
         ld = np.log(np.arange(1, self.D + 1.0)) / np.log(self.D)
         return np.stack([ld ** p for p in range(self.hazard_degree + 1)], -1)
 
-    def _hazard(self, x):
-        """x (..., T, q) -> leave probability (..., T, K, D)."""
-        eta = (self.c_ @ self._basis().T)                                      # (K, D)
+    def _hazard_logits(self, x):
+        eta = self.c_ @ self._basis().T
         eta = np.broadcast_to(eta, x.shape[:-1] + eta.shape)
         if self.hazard_predictors:
             eta = eta + (x @ self.beta_.T)[..., None]
-        return np.clip(1.0 / (1.0 + np.exp(-eta)), 1e-6, 1 - 1e-6)
+        return eta
+
+    def _hazard(self, x):
+        """x (..., T, q) -> leave probability (..., T, K, D)."""
+        return np.clip(expit(self._hazard_logits(x)), 1e-15, 1 - 1e-15)
 
     def _dest(self, x):
         """x (..., T, q) -> destination probabilities (..., T, K, K), zero diagonal."""
@@ -588,13 +835,26 @@ class NHSMM(NHMM):
         logits = np.where(np.eye(self.K, dtype=bool), -np.inf, logits)
         return np.exp(logits - logsumexp(logits, axis=-1, keepdims=True))
 
+    @staticmethod
+    def _age_logprobs(eta):
+        """Equilibrium age probabilities, with the last age aggregating the tail."""
+        log_stay = -np.logaddexp(0.0, eta)
+        log_leave = -np.logaddexp(0.0, -eta)
+        log_survival = np.concatenate([np.zeros(eta.shape[:-1] + (1,)),
+                                       np.cumsum(log_stay[..., :-1], axis=-1)], axis=-1)
+        log_survival[..., -1] -= log_leave[..., -1]
+        return log_survival - logsumexp(log_survival, axis=-1, keepdims=True)
+
     def _initial(self, x0):
         """x0 (..., q) -> day-0 distribution over (K, D): pi_k x equilibrium age."""
-        h = self._hazard(x0[..., None, :])[..., 0, :, :]                      # (..., K, D)
-        age = np.concatenate([np.ones(h.shape[:-1] + (1,)), np.cumprod(1 - h[..., :-1], -1)], -1)
-        age[..., -1] /= h[..., -1]
-        age /= age.sum(-1, keepdims=True)
-        return self.pi_[..., :, None] * age
+        eta = self._hazard_logits(x0[..., None, :])[..., 0, :, :]
+        age = np.exp(self._age_logprobs(eta))
+        return self._initial_probs(x0)[..., :, None] * age
+
+    def _initial_probs(self, x0):
+        if self.initial_predictors:
+            return super()._initial_probs(x0)
+        return np.broadcast_to(self.pi_, (len(x0), self.K))
 
     def _fb(self, le, H, Q, init):
         """Scaled forward-backward on the expanded chain.
@@ -641,63 +901,81 @@ class NHSMM(NHMM):
         xi = ah.sum(-1)[..., :, None] * Q[:, 1:] * eb[:, :, None, :, 0] / cc
         return w_leave, w_stay, xi
 
-    def _m_step_hazard(self, w_leave, w_stay, xs, max_newton=30):
-        """Weighted logistic regression per state: leave vs stay, features
-        (duration basis, predictors), Gaussian prior ``ridge`` on all but the
-        intercept. Damped Newton iterations to convergence (the penalized
-        objective is concave), so each M-step really maximizes."""
-        B = self._basis()                                                       # (D, b)
-        nb = B.shape[1]
+    def _hazard_objective(self, theta, state, w_leave, w_stay, xs, initial_posterior, x0):
+        """Negative complete log-likelihood + ridge; returns analytic gradient.
+
+        The initial-age term depends on the hazard. Omitting it gives an
+        invalid EM M-step whenever initial ages use equilibrium survival.
+        """
+        basis = self._basis()
+        nb = basis.shape[1]
         q = xs.shape[-1] if self.hazard_predictors else 0
-        for k in range(self.K):
-            wl, n = w_leave[:, :, k], w_leave[:, :, k] + w_stay[:, :, k]       # (Y,T-1,D)
-            theta = np.r_[self.c_[k], self.beta_[k] if q else []]
-            pen = np.full(theta.size, self.ridge); pen[0] = 1e-6
-
-            def eta_of(th):
-                e = (B @ th[:nb])[None, None]
-                return e + (xs @ th[nb:])[..., None] if q else np.broadcast_to(e, wl.shape)
-
-            def objective(th):
-                e = eta_of(th)
-                return float((wl * e - n * np.logaddexp(0.0, e)).sum() - 0.5 * (pen * th ** 2).sum())
-
-            f = objective(theta)
-            for _ in range(max_newton):
-                p = 1.0 / (1.0 + np.exp(-eta_of(theta)))
-                r, w = wl - n * p, n * p * (1 - p)
-                wd = w.sum((0, 1))
-                grad = [B.T @ r.sum((0, 1))]
-                Hcc = (B * wd[:, None]).T @ B
-                if q:
-                    grad.append(np.einsum("yt,ytq->q", r.sum(-1), xs))
-                    Hcb = B.T @ np.einsum("ytd,ytq->dq", w, xs)
-                    Hbb = np.einsum("yt,ytq,ytr->qr", w.sum(-1), xs, xs)
-                    Hm = np.block([[Hcc, Hcb], [Hcb.T, Hbb]])
-                else:
-                    Hm = Hcc
-                grad = np.concatenate(grad) - pen * theta
-                step = np.linalg.solve(Hm + np.diag(pen) + 1e-9 * np.eye(theta.size), grad)
-                t = 1.0
-                while t > 1e-4:
-                    cand = theta + t * step
-                    fc = objective(cand)
-                    if fc >= f - 1e-10:
-                        break
-                    t *= 0.5
-                else:
-                    break
-                theta, f_old, f = cand, f, fc
-                if abs(f - f_old) < 1e-8 * max(abs(f), 1.0) and np.abs(t * step).max() < 1e-6:
-                    break
-            self.c_[k] = theta[:nb]
+        eta = np.broadcast_to((basis @ theta[:nb])[None, None], w_leave.shape)
+        if q:
+            eta = eta + (xs @ theta[nb:])[..., None]
+        n = w_leave + w_stay
+        residual = w_leave - n * expit(eta)
+        loglik = float((w_leave * eta - n * np.logaddexp(0.0, eta)).sum())
+        gradient = [basis.T @ residual.sum((0, 1))]
+        if q:
+            gradient.append(np.einsum("yt,ytq->q", residual.sum(-1), xs))
+        gradient = np.concatenate(gradient)
+        if initial_posterior is not None:
+            eta0 = np.broadcast_to((basis @ theta[:nb])[None], initial_posterior.shape)
             if q:
-                self.beta_[k] = theta[nb:]
+                eta0 = eta0 + (x0 @ theta[nb:])[:, None]
+            log_age = self._age_logprobs(eta0)
+            loglik += float((initial_posterior * log_age).sum())
+            centered = initial_posterior - initial_posterior.sum(-1, keepdims=True) * np.exp(log_age)
+            # d(log survival at age d)/d(eta_j) = -h_j for d > j.
+            tail_sum = np.flip(np.cumsum(np.flip(centered, axis=-1), axis=-1), axis=-1) - centered
+            residual0 = -expit(eta0) * tail_sum
+            # The aggregated terminal age has mass S(D-1)/h(D).
+            residual0[..., -1] = -(1 - expit(eta0[..., -1])) * centered[..., -1]
+            gradient[:nb] += basis.T @ residual0.sum(0)
+            if q:
+                gradient[nb:] += x0.T @ residual0.sum(-1)
+        penalty = np.full(theta.size, self.ridge)
+        penalty[0] = 1e-6
+        return (-loglik + 0.5 * float((penalty * theta ** 2).sum()),
+                -gradient + penalty * theta)
+
+    def _m_step_hazard(self, w_leave, w_stay, xs, initial_posterior=None, x0=None):
+        """Numerical generalized EM update including initial-age probabilities."""
+        nb = self._basis().shape[1]
+        q = xs.shape[-1] if self.hazard_predictors else 0
+        for state in range(self.K):
+            theta = np.r_[self.c_[state], self.beta_[state] if q else []]
+            init = None if initial_posterior is None else initial_posterior[:, state]
+            args = (state, w_leave[:, :, state], w_stay[:, :, state], xs, init, x0)
+            result = minimize(self._hazard_objective, theta, args=args, method="L-BFGS-B", jac=True)
+            if np.isfinite(result.fun) and result.fun <= self._hazard_objective(theta, *args)[0] + 1e-8:
+                self.c_[state] = result.x[:nb]
+                if q:
+                    self.beta_[state] = result.x[nb:]
+
+    def _parameter_names(self):
+        return super()._parameter_names() + ("pi_", "c_", "beta_")
+
+    def _penalty(self):
+        off = ~np.eye(self.K, dtype=bool)
+        return (super()._penalty() + 0.5 * self.ridge * float(
+            (self.c_[:, 1:] ** 2).sum() + (self.beta_ ** 2).sum() +
+            (self.A_[off] ** 2).sum() + (self.lam_ ** 2).sum()) +
+            0.5e-6 * float((self.c_[:, 0] ** 2).sum()))
+
+    def _observed_loglik(self, rain, x):
+        self._x = x
+        return self._fb(self._log_emission(rain, x), *self._pieces(x))[-1]
 
     def _m_step_dest(self, xi, xs):
         """Weighted multinomial logit for the destination of a state change."""
         K, q = self.K, xs.shape[-1]
         if K == 2:
+            # There is a single possible destination per state: its probability
+            # is one, so these unidentifiable logits must not retain a ridge cost.
+            self.A_.fill(0.0)
+            self.lam_.fill(0.0)
             return
         off = ~np.eye(K, dtype=bool)
         tot = xi.sum(-1)                                                        # (Y,T-1,K)
@@ -729,7 +1007,8 @@ class NHSMM(NHMM):
         self.valid_sites_ = np.isfinite(rain).any((0, 1))
         K, q, nb = self.K, x.shape[-1], self.hazard_degree + 1
         if self.init_iter > 0:
-            base = NHMM(K, self.amounts, self.amount_predictor, self.thr, self.init_iter, self.tol, self.seed).fit(rain, x)
+            base = NHMM(K, self.amounts, self.amount_predictor, self.thr, self.init_iter, self.tol, self.seed,
+                        self.initial_predictors, self.initial_ridge, self.amount_resolution).fit(rain, x)
             for name in ("p_", "shape_", "scale_", "g_"):
                 setattr(self, name, getattr(base, name).copy())
             self._x = x
@@ -737,31 +1016,42 @@ class NHSMM(NHMM):
             stay = np.einsum("ytk,ytkk->k", base.gamma_, P) / base.gamma_.sum((0, 1))
             self.A_, self.lam_ = base.A_.copy(), base.lam_.copy()
             self.pi_ = base.pi0_.copy()
+            self.pi0_ = self.pi_.copy()
+            self.initial_coef_ = base.initial_coef_.copy()
             self.nhmm_init_ = base
         else:
             self._init_emissions(rain, x)
             stay = np.full(K, 0.7)
             self.A_, self.lam_ = np.zeros((K, K)), np.zeros((K, q))
             self.pi_ = np.full(K, 1.0 / K)
+            self.pi0_ = self.pi_.copy()
+            self.initial_coef_ = np.zeros((q + 1, K - 1))
         self.c_ = np.zeros((K, nb))
         self.c_[:, 0] = np.log((1 - stay) / np.clip(stay, 1e-3, None))
         self.beta_ = np.zeros((K, q))
         xs = x[:, 1:]
         prev = -np.inf
         self.loglik_ = []
+        self.objective_ = []
         for it in range(self.n_iter):
             self._x = x
             le = self._log_emission(rain)
             H, Q, init = self._pieces(x)
             a, b, c, e, ll = self._fb(le, H, Q, init)
             self.loglik_.append(ll)
+            old_objective = ll - self._penalty()
+            self.objective_.append(old_objective)
+            previous = {name: getattr(self, name).copy() for name in self._parameter_names()}
             post = a * b                                                        # (Y,T,K,D)
             g = post.sum(-1)
             self.pi_ = np.clip(g[:, 0].mean(0), 1e-6, None); self.pi_ /= self.pi_.sum()
+            self.pi0_ = self.pi_
+            self._fit_initial(g[:, 0], x[:, 0])
             self._m_step_emissions(g, rain, x)
             w_leave, w_stay, xi = self._expected_counts(a, b, c, e, H, Q)
-            self._m_step_hazard(w_leave, w_stay, xs)
+            self._m_step_hazard(w_leave, w_stay, xs, post[:, 0], x[:, 0])
             self._m_step_dest(xi, xs)
+            self._accept_m_step(previous, rain, x, old_objective)
             if abs(ll - prev) < self.tol * abs(ll):
                 break
             prev = ll
@@ -770,14 +1060,10 @@ class NHSMM(NHMM):
         post = a * b
         self.gamma_ = post.sum(-1)
         self.loglik_.append(final_ll)
+        self.objective_.append(final_ll - self._penalty())
         self.duration_posterior_ = post.sum((0, 1))                              # expected days in (k, age)
         self.pi0_ = self.pi_
         return self
-
-    def loglik(self, rain, predictors):
-        x = np.asarray(predictors, float)
-        self._x = x
-        return self._fb(self._log_emission(np.asarray(rain, float)), *self._pieces(x))[-1]
 
     # --- decoding, simulation, diagnostics ---
     def viterbi(self, rain, predictors):
@@ -892,8 +1178,10 @@ def nhmm_predictors(ensemble_blocks, smooth=5, reference=None, harmonics=0, date
 def stratified_quantiles(sample, M):
     """M representative values of a (N, ...) sample: means of M equal-probability bins.
 
-    Equidistant quantiles i/(M+1) cut the upper tail of skewed daily rainfall
-    and lose several percent of the mean; bin means keep the mean exactly.
+    Package alternative to ECC-Q of Roman Schefzik, Thordis L. Thorarinsdottir
+    and Tilmann Gneiting (2013). Bin means preserve the finite sample mean
+    exactly; point quantiles need not. This is not original ECC-Q.
+    Reference: https://doi.org/10.1214/13-STS443.
     """
     M = int(M)
     x = np.asarray(sample, float)
@@ -913,16 +1201,49 @@ def stratified_quantiles(sample, M):
     return np.stack(out)
 
 
+def point_quantiles(sample, M, convention="midpoint"):
+    """Marginal sample quantiles at explicitly chosen probability levels.
+
+    ``convention='midpoint'`` uses (i - 1/2) / M (Scheuerer et al. 2017);
+    ``convention='ecc'`` uses i / (M + 1) (Schefzik et al. 2013, ECC-Q).
+    Uses linear interpolation on the finite empirical sample per column.
+    Entirely missing columns remain missing; one-value columns stay constant.
+    """
+    x = np.asarray(sample, float)
+    M = int(M)
+    if x.ndim < 1 or x.shape[0] < 1 or M < 1:
+        raise ValueError("sample must have a nonempty sample axis and M must be positive")
+    if convention not in {"midpoint", "ecc"}:
+        raise ValueError("convention must be 'midpoint' or 'ecc'")
+    shape = x.shape[1:]
+    ordered = np.sort(np.where(np.isfinite(x), x, np.nan).reshape(x.shape[0], -1), axis=0)
+    count = np.isfinite(ordered).sum(0)
+    u = ((np.arange(M, dtype=float) + 0.5) / M if convention == "midpoint" else
+         np.arange(1, M + 1, dtype=float) / (M + 1))
+    pos = u[:, None] * np.maximum(count[None] - 1, 0)
+    lo = np.floor(pos).astype(int)
+    hi = np.ceil(pos).astype(int)
+    a = np.take_along_axis(ordered, lo, axis=0)
+    b = np.take_along_axis(ordered, hi, axis=0)
+    out = a + (b - a) * (pos - lo)
+    return np.where(count[None] > 0, out, np.nan).reshape((M,) + shape)
+
+
 def ensemble_copula_coupling(raw, calibrated, method="Q", rng=None):
-    """ECC (Schefzik, Thorarinsdottir & Gneiting 2013).
+    """ECC of Roman Schefzik, Thordis L. Thorarinsdottir and Tilmann Gneiting
+    (2013), https://doi.org/10.1214/13-STS443.
 
     raw : (M, ...) raw ensemble supplying the rank (copula) structure
     calibrated : (N, ...) samples from the calibrated marginal of every column
         (N >= M; e.g. pooled corrected members of neighbouring days)
-    method : 'Q' = M stratified quantiles (means of M equal-probability bins,
-        mean-preserving); 'R' = M random draws.
+    method : 'Q' = M point quantiles at i/(M+1) (original ECC-Q),
+        'Q-midpoint' = quantiles at (i-1/2)/M (CRPS quantization; 0.9.0 convention),
+        'Q-mean' = M means of equal-probability bins (historical variant,
+        preserves the marginal sample mean); 'R' = M random draws.
     Ties in the raw ensemble (dry days) are broken at random.
     Returns (M, ...) with the calibrated marginals and the raw ranks.
+    ECC-Q/R restore the raw rank dependence; this assumes that the raw copula
+    is useful. It does not independently correct an erroneous raw copula.
     """
     rng = rng if rng is not None else np.random.default_rng()
     raw = np.asarray(raw, float)
@@ -931,6 +1252,10 @@ def ensemble_copula_coupling(raw, calibrated, method="Q", rng=None):
         raise ValueError("raw and calibrated need nonempty member axes and identical column dimensions")
     M = raw.shape[0]
     if method == "Q":
+        values = point_quantiles(cal, M, convention="ecc")
+    elif method == "Q-midpoint":
+        values = point_quantiles(cal, M, convention="midpoint")
+    elif method == "Q-mean":
         values = stratified_quantiles(cal, M)
     elif method == "R":
         ordered = np.sort(np.where(np.isfinite(cal), cal, np.nan), axis=0)
@@ -938,7 +1263,7 @@ def ensemble_copula_coupling(raw, calibrated, method="Q", rng=None):
         idx = (rng.random((M,) + cal.shape[1:]) * count[None]).astype(int)
         values = np.sort(np.take_along_axis(ordered, idx, axis=0), axis=0)
     else:
-        raise ValueError("method must be 'Q' or 'R'")
+        raise ValueError("method must be 'Q', 'Q-midpoint', 'Q-mean' or 'R'")
     # An entirely missing raw column has no copula information. A partly
     # missing active column is rejected by schaake_shuffle rather than ranked
     # as artificial negative-infinite rainfall.
@@ -947,7 +1272,11 @@ def ensemble_copula_coupling(raw, calibrated, method="Q", rng=None):
 
 
 def preferential_dates(forecast_mean, obs_seasons, n, window=7, climatology=None):
-    """Historical trajectories most similar to the forecast (after Scheuerer et al. 2017).
+    """Package forecast-mean analogue heuristic for a Schaake shuffle.
+
+    Reordering comes from Martyn Clark, Subhrendu Gangopadhyay, Lauren Hay,
+    Balaji Rajagopalan and Robert Wilby (2004); see module references.
+    The forecast-mean ranking below is a package extension.
 
     forecast_mean : (T, S) forecast ensemble-mean (calibrated) field for each day
     obs_seasons   : (Y, T + 2*window, S) observed seasons padded by ``window`` days
@@ -956,7 +1285,10 @@ def preferential_dates(forecast_mean, obs_seasons, n, window=7, climatology=None
     climatology of the candidates) between the forecast and the observed
     trajectory. The best shift of each year is taken first, so templates stay
     diverse; returns (year indices, offsets, scores) of the n best. Standard
-    Schaake uses random candidates instead.
+    Schaake uses random candidates instead. This selects individual sequences
+    by squared error to the forecast *mean*. It does not implement the minimum
+    divergence Schaake shuffle (MDSS) of Scheuerer et al. (2017), which selects
+    a set of sequences by agreement of all marginal forecast distributions.
     """
     f = np.asarray(forecast_mean, float)
     obs = np.asarray(obs_seasons, float)
@@ -994,6 +1326,156 @@ def preferential_dates(forecast_mean, obs_seasons, n, window=7, climatology=None
     return np.array([cands[i][0] for i in best]), np.array([cands[i][1] for i in best]), score[best]
 
 
+def minimum_divergence_selection(calibrated, candidates, n, component_weights=None,
+                                 temperature_forecast=None, temperature_candidates=None,
+                                 temperature_pool=None):
+    """Select a set of trajectories by Minimum Divergence Schaake Shuffle.
+
+    Implements Eq. (5) of Michael Scheuerer, Thomas M. Hamill, Brett Whitin,
+    Minxue He and Arthur Henkel (2017), https://doi.org/10.1002/2016WR020133,
+    with exact one-at-a-time
+    backward elimination. The predictive CDF is the finite empirical CDF of
+    ``calibrated`` (sample, ...); ``candidates`` is (candidate, ...) on identical
+    fields. The exact discrete objective is sum_j w_j integral (H_j-F_j)^2 dx.
+    This is a numerical approximation to the article's continuous predictive
+    CDFs; it is not forecast-mean analogue selection or a global optimum over
+    all subsets. No duplicate candidates are generated when n exceeds support.
+
+    Entirely missing predictive fields are ignored. Candidate trajectories
+    must be complete on the active fields. ``component_weights`` has the field
+    shape and defaults to one, as in the article's precipitation criterion.
+    Weights may express fixed area/lead/variable scaling in mixed-unit uses.
+
+    Optional matching temperature arrays apply the article's preliminary
+    99-percent interval screen: retain all candidates with at most m violations,
+    choosing the smallest m leaving at least ``temperature_pool`` (>= n) dates.
+    The two variables then share the same selected trajectory indices.
+
+    Returns selected original indices and a diagnostic dictionary containing
+    objective history, deletion order, active fields and retained support.
+    Memory is O(candidate_count * field_count), not O(candidate_count squared).
+    Empirical marginals, optional component weights and seasonal windows are
+    package adaptations. The paper's CSGD/EMOS marginal fits and river-basin
+    streamflow evaluation are not reproduced here.
+    """
+    forecast = np.asarray(calibrated, float)
+    historical = np.asarray(candidates, float)
+    if (forecast.ndim < 2 or historical.ndim != forecast.ndim or
+            forecast.shape[1:] != historical.shape[1:] or
+            not forecast.shape[0] or not historical.shape[0]):
+        raise ValueError("calibrated and candidates need nonempty sample axes and matching fields")
+    if not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("n must be a positive integer")
+    shape = forecast.shape[1:]
+    weights = np.ones(shape) if component_weights is None else np.asarray(component_weights, float)
+    if weights.shape != shape or not np.isfinite(weights).all() or (weights < 0).any():
+        raise ValueError("component_weights must be finite nonnegative and match the field shape")
+    flat_forecast = forecast.reshape(forecast.shape[0], -1)
+    active = np.isfinite(flat_forecast).any(0) & (weights.ravel() > 0)
+    if not active.any():
+        raise ValueError("No finite predictive fields with positive component weight")
+    flat = historical.reshape(historical.shape[0], -1)
+    retained = np.flatnonzero(np.isfinite(flat[:, active]).all(1))
+    if retained.size < n:
+        raise ValueError("Not enough complete historical trajectories for n distinct MDSS templates")
+    violations = None
+    if (temperature_forecast is None) != (temperature_candidates is None):
+        raise ValueError("temperature_forecast and temperature_candidates must be supplied together")
+    if temperature_forecast is not None:
+        tf, tc = np.asarray(temperature_forecast, float), np.asarray(temperature_candidates, float)
+        if tf.ndim < 2 or tc.ndim != tf.ndim or tf.shape[1:] != tc.shape[1:] or tc.shape[0] != len(historical):
+            raise ValueError("temperature arrays must have matching fields and the same candidate axis")
+        target_pool = len(retained) if temperature_pool is None else int(temperature_pool)
+        if target_pool < n:
+            raise ValueError("temperature_pool must be at least n")
+        af = np.isfinite(tf).any(0)
+        if not af.any():
+            raise ValueError("temperature forecast has no finite fields")
+        interval = np.nanquantile(tf[:, af], [0.005, 0.995], axis=0)
+        complete = np.isfinite(tc[retained][:, af]).all(1)
+        retained = retained[complete]
+        if len(retained) < n:
+            raise ValueError("Not enough complete joint precipitation/temperature trajectories")
+        values = tc[retained][:, af]
+        violations = ((values < interval[0]) | (values > interval[1])).sum(1)
+        k = min(target_pool, len(retained))
+        cutoff = np.partition(violations, k - 1)[k - 1]
+        retained = retained[violations <= cutoff]
+    fields = flat[retained][:, active]
+    forecast_fields = flat_forecast[:, active]
+    weight = weights.ravel()[active]
+    # Translating each marginal leaves all absolute distances unchanged and
+    # reduces cancellation for large-offset variables (e.g. Kelvin temperature).
+    center = np.nanmean(forecast_fields, axis=0)
+    fields = fields - center
+    forecast_fields = forecast_fields - center
+    count = np.isfinite(forecast_fields).sum(0)
+    # A_i = sum_j w_j E_F |historical_ij - Y_j|; variable finite sample counts
+    # are respected instead of treating missing forecast values as zero.
+    cross = np.zeros(len(fields))
+    for sample in forecast_fields:
+        valid = np.isfinite(sample)
+        cross += (np.abs(fields[:, valid] - sample[valid]) * (weight[valid] / count[valid])).sum(1)
+
+    def pair_row_sums(values):
+        order = np.argsort(values, axis=0)
+        ordered = np.take_along_axis(values, order, axis=0)
+        prefix = np.cumsum(ordered, axis=0) - ordered
+        rank = np.arange(len(values))[:, None]
+        sums = (2 * rank - len(values)) * ordered - 2 * prefix + ordered.sum(0)
+        inverse = np.argsort(order, axis=0)
+        return (np.take_along_axis(sums, inverse, axis=0) * weight).sum(1)
+
+    pair = pair_row_sums(fields)
+    # The target-target constant is computed independently per marginal,
+    # allowing missing members and preserving the empirical distribution.
+    target_pair = 0.0
+    for column in range(forecast_fields.shape[1]):
+        sample = np.sort(forecast_fields[np.isfinite(forecast_fields[:, column]), column])
+        ranks = np.arange(len(sample))
+        target_pair += weight[column] * 2 * np.dot(2 * ranks - len(sample) + 1, sample) / len(sample) ** 2
+    cross_sum, pair_sum = float(cross.sum()), float(pair.sum())
+    current = np.arange(len(fields))
+    divergence = lambda size: max(0.0, cross_sum / size - pair_sum / (2 * size ** 2) - target_pair / 2)
+    history = [divergence(len(current))]
+    removed = []
+    while len(current) > n:
+        size = len(current) - 1
+        score = ((cross_sum - cross[current]) / size -
+                 (pair_sum - 2 * pair[current]) / (2 * size ** 2) - target_pair / 2)
+        drop = current[int(np.argmin(score))]
+        removed.append(int(retained[drop]))
+        current = current[current != drop]
+        pair_sum -= 2 * pair[drop]
+        cross_sum -= cross[drop]
+        pair[current] -= (np.abs(fields[current] - fields[drop]) * weight).sum(1)
+        history.append(divergence(len(current)))
+    return retained[current], {"divergence": np.asarray(history), "removed_indices": np.asarray(removed, int),
+                               "active_fields": active.reshape(shape), "retained_candidates": len(retained),
+                               "target_cdf": "empirical", "algorithm": "one-at-a-time backward elimination"}
+
+
+def minimum_divergence_dates(calibrated, obs_seasons, n, window=7, component_weights=None):
+    """MDSS selection of year/offset templates from padded seasonal observations.
+
+    Returns (year_indices, offsets, diagnostics); see
+    ``minimum_divergence_selection`` for the exact distributional criterion
+    of Michael Scheuerer, Thomas M. Hamill, Brett Whitin, Minxue He and Arthur
+    Henkel (2017), https://doi.org/10.1002/2016WR020133. Padded seasonal
+    candidates are a package adaptation of that criterion.
+    """
+    forecast, obs = np.asarray(calibrated, float), np.asarray(obs_seasons, float)
+    w = int(window)
+    if (forecast.ndim != 3 or obs.ndim != 3 or w < 0 or
+            obs.shape[1:] != (forecast.shape[1] + 2 * w, forecast.shape[2]) or not len(obs)):
+        raise ValueError("forecast (member,day,site) and padded observations (year,day+2*window,site) must agree")
+    candidates = [(year, offset) for year in range(len(obs)) for offset in range(-w, w + 1)]
+    trajectories = np.stack([obs[year, w + offset:w + offset + forecast.shape[1]] for year, offset in candidates])
+    indices, info = minimum_divergence_selection(forecast, trajectories, n, component_weights)
+    return (np.asarray([candidates[i][0] for i in indices]),
+            np.asarray([candidates[i][1] for i in indices]), info)
+
+
 # ---------------------------------------------------------------------------
 # 4. Pipeline
 # ---------------------------------------------------------------------------
@@ -1006,15 +1488,32 @@ class DynamicalDownscaler:
     ``"none"`` (keep corrected members as they are), ``"ecc"`` (ECC-Q on the
     raw member ranks), ``"schaake"`` (random observed template seasons),
     ``"preferential"`` (observed seasons most similar to the corrected forecast
-    mean, Scheuerer et al. 2017).
+    mean). ``"preferential"`` is a forecast-mean analogue selection, not MDSS
+    as defined by Scheuerer et al. (2017). ``"mdss"`` implements backward
+    elimination minimizing the full marginal-CDF divergence of historical
+    trajectories against the empirical predictive sample. All shuffle methods
+    use the same predictive point quantiles by default. Set
+    ``ecc_quantiles="Q-midpoint"`` for the MDSS 2017 midpoint quantiles and the
+    0.9.0 ECC convention, or ``ecc_quantiles="Q-mean"`` for
+    the mean-preserving quantile-bin convention used in version 0.8.0.
+
+    Scientific components: Schmidli, Frei and Vidale (2006), LOCI;
+    Gudmundsson, Bremnes, Haugen and Engen-Skaugen (2012), QM review;
+    Schefzik, Thorarinsdottir and Gneiting (2013), ECC;
+    Clark, Gangopadhyay, Hay, Rajagopalan and Wilby (2004), Schaake reordering;
+    Scheuerer, Hamill, Whitin, He and Henkel (2017), MDSS. Full references
+    and DOI links are in the module docstring. Pooling and this composition
+    are package choices, not one published experiment.
     """
 
     def __init__(self, months=(7, 8, 9), corrector="loci_qm", coupling="ecc", pool_days=2, window=7,
-                 wet_threshold=1.0, seed=42):
-        if coupling not in {"none", "ecc", "schaake", "preferential"}:
-            raise ValueError("coupling must be 'none', 'ecc', 'schaake' or 'preferential'")
+                 wet_threshold=1.0, seed=42, ecc_quantiles="Q"):
+        if coupling not in {"none", "ecc", "schaake", "preferential", "mdss"}:
+            raise ValueError("coupling must be 'none', 'ecc', 'schaake', 'preferential' or 'mdss'")
+        if ecc_quantiles not in {"Q", "Q-midpoint", "Q-mean"}:
+            raise ValueError("ecc_quantiles must be 'Q', 'Q-midpoint' or 'Q-mean'")
         self.months, self.coupling, self.pool, self.window = validate_months(months), coupling, int(pool_days), int(window)
-        self.thr, self.seed = float(wet_threshold), int(seed)
+        self.thr, self.seed, self.ecc_quantiles = float(wet_threshold), int(seed), ecc_quantiles
         if self.pool < 0 or self.window < 0 or not np.isfinite(self.thr) or self.thr <= 0:
             raise ValueError("pool_days/window must be nonnegative and wet_threshold positive")
         self.corrector = DailyBiasCorrector(corrector, wet_threshold) if isinstance(corrector, str) else corrector
@@ -1031,8 +1530,11 @@ class DynamicalDownscaler:
         first, e.g. ``hindcast.interp_like(obs, method='nearest')``); ``years`` =
         hindcast seasons (years of the first month) present in both, used to fit
         the corrector. ``template_years``: observed seasons allowed as Schaake
-        templates (default: every complete observed season). ``downscale``
-        never uses the target season itself as a template."""
+        templates (default: complete seasons in ``years``). ``downscale``
+        only uses template seasons before the target season, unless
+        ``allow_future_templates=True`` is explicitly passed. Fitting the
+        corrector itself on a target year is still in-sample: for hindcast
+        validation, refit on training years for each fold."""
         self.years_ = [int(y) for y in years]
         if not self.years_:
             raise ValueError("years must contain at least one complete calibration season")
@@ -1042,9 +1544,10 @@ class DynamicalDownscaler:
         ob = season_blocks(obs, self.years_, self.months)[:, 0]                 # (Y, T, S)
         self.month_ = season_dates(self.years_[0], self.months).month.to_numpy()
         self.corrector.fit(mod, ob, self.month_)
-        # padded observed seasons for Schaake templates (all complete observed seasons)
+        # Default templates are limited to fit years, rather than any future
+        # observed season that happens to be present in the supplied dataset.
         t_obs = pd.DatetimeIndex(obs["T"].values)
-        candidates = range(t_obs.year.min(), t_obs.year.max() + 1) if template_years is None else [int(y) for y in template_years]
+        candidates = self.years_ if template_years is None else [int(y) for y in template_years]
         all_years = [y for y in candidates if _padded_dates(y, self.months, self.window).isin(t_obs).all()]
         stacked = obs.assign_coords(T=t_obs.normalize()).stack(site=("Y", "X")).transpose("T", "site")
         pads = []
@@ -1064,8 +1567,12 @@ class DynamicalDownscaler:
         T = corrected.shape[1]
         return np.concatenate([corrected[:, np.clip(np.arange(T) + k, 0, T - 1)] for k in range(-self.pool, self.pool + 1)], 0)
 
-    def downscale(self, forecast: xr.DataArray, year, n_members=None):
-        """forecast: daily PRCP (member, T, Y, X) on the observation grid for season ``year``."""
+    def downscale(self, forecast: xr.DataArray, year, n_members=None, allow_future_templates=False):
+        """Daily forecast on the fitted grid for season ``year``.
+
+        ``allow_future_templates=True`` permits noncausal historical templates
+        for an explicit sensitivity experiment; avoid it in hindcasts.
+        """
         if not hasattr(self, "years_"):
             raise RuntimeError("Call fit before downscale")
         raw = season_blocks(self._model_on_grid(forecast), [int(year)], self.months)[0]  # (M, T, S)
@@ -1085,17 +1592,24 @@ class DynamicalDownscaler:
             if self.coupling == "ecc":
                 if M > raw.shape[0]:
                     raise ValueError("ECC returns at most the raw ensemble size")
-                out = ensemble_copula_coupling(raw[:M], pooled, "Q", rng)
+                out = ensemble_copula_coupling(raw[:M], pooled, self.ecc_quantiles, rng)
             else:
-                values = stratified_quantiles(pooled, M)
-                keep = np.array([y != int(year) for y in self.obs_years_])      # never the target season itself
+                values = (stratified_quantiles(pooled, M) if self.ecc_quantiles == "Q-mean" else
+                          point_quantiles(pooled, M, convention=("ecc" if self.ecc_quantiles == "Q" else "midpoint")))
+                keep = np.array([y != int(year) and (allow_future_templates or y < int(year))
+                                 for y in self.obs_years_])
                 pool_idx = np.flatnonzero(keep)
                 if pool_idx.size == 0:
-                    raise ValueError("No complete observed template seasons remain after excluding the forecast year")
+                    raise ValueError("No eligible observed template seasons precede the target year; "
+                                     "fit with earlier template_years or explicitly set allow_future_templates=True")
                 if self.coupling == "schaake":
                     C = pool_idx.size * (2 * self.window + 1)
                     pick = rng.choice(C, M, replace=M > C)
                     yi, oi = pool_idx[pick // (2 * self.window + 1)], pick % (2 * self.window + 1) - self.window
+                elif self.coupling == "mdss":
+                    yi, oi, selection = minimum_divergence_dates(pooled, self.obs_padded_[keep], M, self.window)
+                    yi = pool_idx[yi]
+                    info["mdss"] = selection
                 else:
                     yi, oi, score = preferential_dates(np.nanmean(corrected, 0), self.obs_padded_[keep], M, self.window)
                     yi = pool_idx[yi]
@@ -1113,6 +1627,13 @@ class DynamicalDownscaler:
         ds.PRCP.attrs["units"] = "mm d-1"
         ds.attrs.update(generator="was-disaggregation dynamical downscaling", corrector=getattr(self.corrector, "method", type(self.corrector).__name__),
                         coupling=self.coupling, pool_days=self.pool)
+        if self.coupling == "ecc":
+            ds.attrs["ecc_quantiles"] = self.ecc_quantiles
+        if self.coupling != "none":
+            ds.attrs["marginal_quantiles"] = self.ecc_quantiles
+        if self.coupling == "mdss":
+            ds.attrs["mdss_target_cdf"] = "empirical"
+            ds.attrs["mdss_selection"] = "one-at-a-time backward elimination"
         self.info_ = info
         return ds
 
@@ -1180,4 +1701,4 @@ def synthetic_model_ensemble(observations: xr.Dataset, years, months=(7, 8, 9), 
 
 
 __all__ = ["DailyBiasCorrector", "ExternalCorrector", "NHMM", "NHSMM", "state_durations", "nhmm_predictors", "ensemble_copula_coupling",
-           "preferential_dates", "DynamicalDownscaler", "synthetic_model_ensemble", "season_blocks"]
+           "preferential_dates", "minimum_divergence_selection", "minimum_divergence_dates", "DynamicalDownscaler", "synthetic_model_ensemble", "season_blocks"]

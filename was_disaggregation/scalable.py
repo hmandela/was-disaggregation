@@ -1,4 +1,9 @@
-"""Dask tiled generation with spatially shared, deterministic innovations."""
+"""Dask tiled generation with spatially shared, deterministic innovations.
+
+Dask orchestration and deterministic tiling are package infrastructure.
+Spatial-kernel attribution and approximation limits are documented in
+was_disaggregation.spatial; tiled execution does not create a new weather model.
+"""
 from __future__ import annotations
 import json
 import numpy as np
@@ -65,16 +70,40 @@ def generate_dask(observations, probabilities, year, n_members=20,
     ty,tx = map(int,tile_shape)
     if min(ty,tx,n_members,member_batch,calibration_side) < 1:
         raise ValueError("Tiles, batches, calibration_side and ensemble sizes must be positive")
+    if model_options.get("spatial_backend") == "dense" and model_options.get("spatial", "distance") == "distance":
+        raise ValueError("generate_dask requires spatial_backend='features' for shared spatial tiles; "
+                         "use WeatherGenerator for the dense finite-domain reference backend")
     options = dict(months=months,climatology=climatology,seed=seed,**model_options)
+    if options.get("temperature_probabilities") is not None:
+        options["temperature_probabilities"] = {
+            name: prepare_probabilities(forecast, target=obs)
+            for name, forecast in options["temperature_probabilities"].items()
+        }
+    def local_options(ys, xs):
+        local = options.copy()
+        if local.get("temperature_probabilities") is not None:
+            local["temperature_probabilities"] = {
+                name: forecast.isel(Y=ys, X=xs)
+                for name, forecast in local["temperature_probabilities"].items()
+            }
+        return local
     options.pop("max_sites",None)
     options["max_sites"] = max(ty*tx,calibration_side**2)
     spatial = options.get("spatial","distance")
-    if spatial == "distance" and spatial_models is None:
+    if spatial_models is not None:
+        options["spatial_models"] = spatial_models
+    needs_wilks_alpha = options.get("paper_protocol") == "wilks_2002"
+    if (spatial == "distance" and spatial_models is None) or needs_wilks_alpha:
         yi = multiscale_indices(ny,calibration_side)
         xi = multiscale_indices(nx,calibration_side)
-        calibration = WeatherGenerator(**options).fit(obs.isel(Y=yi,X=xi),prob.isel(Y=yi,X=xi))
-        spatial_models = calibration.spatial_models_
-    if (spatial == "distance" and options.get("conditioning") == "mixture"
+        calibration = WeatherGenerator(**local_options(yi, xi)).fit(
+            obs.isel(Y=yi,X=xi), prob.isel(Y=yi,X=xi))
+        if spatial == "distance" and spatial_models is None:
+            spatial_models = calibration.spatial_models_
+        if needs_wilks_alpha:
+            options["_wilks_domain_alpha"] = calibration.rain_fit_.alpha[:, 0].copy()
+    mixture = options.get("conditioning") == "mixture" and options.get("paper_protocol") is None
+    if (spatial == "distance" and mixture
             and options.get("class_draw", "fitted") == "fitted" and "season_class" not in spatial_models):
         raise ValueError("Mixture with class_draw='fitted' needs a shared 'season_class' kernel in spatial_models "
                          "(refit the calibration with conditioning='mixture', or use class_draw='shared').")
@@ -84,7 +113,6 @@ def generate_dask(observations, probabilities, year, n_members=20,
     nday = len(dates)
     blocks_members=[]
     classes_members=[]
-    mixture = options.get("conditioning") == "mixture"
     for start in range(0,int(n_members),int(member_batch)):
         count=min(int(member_batch),int(n_members)-start)
         blocks_y=[]
@@ -97,7 +125,7 @@ def generate_dask(observations, probabilities, year, n_members=20,
                 xs=slice(x0,min(x0+tx,nx))
                 ids=(np.arange(ys.start,ys.stop)[:,None]*nx+np.arange(xs.start,xs.stop)[None,:]).ravel()
                 task=delayed(_tile_generate)(obs.isel(Y=ys,X=xs),prob.isel(Y=ys,X=xs),ids,
-                    int(year),count,start,options,names)
+                    int(year),count,start,local_options(ys, xs),names)
                 blocks_x.append(da.from_delayed(task[0],shape=(len(names),count,nday,ys.stop-ys.start,xs.stop-xs.start),dtype=np.float32))
                 if mixture:
                     classes_x.append(da.from_delayed(task[1],shape=(count,ys.stop-ys.start,xs.stop-xs.start),dtype=np.int8))
@@ -119,6 +147,8 @@ def generate_dask(observations, probabilities, year, n_members=20,
     result.attrs.update(generator=f"was-disaggregation {__version__} Dask tiles",seed=int(seed),
         season_months=",".join(map(str,months)),climatology=f"{climatology[0]}-{climatology[1]}",
         spatial_method=spatial,spatial_models=json.dumps(spatial_models or {},default=lambda x: np.asarray(x).tolist()),
+        spatial_backend=options.get("spatial_backend", "features"),
+        paper_protocol=options.get("paper_protocol") or "none",
         tile_shape=str(tuple(tile_shape)),member_batch=int(member_batch),
         caveat="Stationary spatial kernels fitted on domain sample; validate regional correlation and seasonal frequencies",
         leap_day_policy="February 29 excluded")

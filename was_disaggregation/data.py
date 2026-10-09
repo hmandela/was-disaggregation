@@ -2,6 +2,10 @@
 
 All meteorological arrays use T,Y,X. Seasons are identified by the year of
 **their first month**; February 29 is omitted, including during generation.
+
+Calendar alignment, unit conversion and probability I/O are package
+infrastructure, not a reproduction of a named scientific article. Scientific
+model references are provided by the modules consuming these inputs.
 """
 from __future__ import annotations
 
@@ -108,6 +112,8 @@ def _validate_grid(obj, *, time=False):
             raise ValueError(f"Duplicate {dim} coordinates are not allowed.")
         if dim != "T" and (not np.issubdtype(vals.dtype, np.number) or not np.isfinite(vals).all()):
             raise ValueError(f"{dim} coordinates must be finite numbers.")
+        if dim == "Y" and ((vals < -90) | (vals > 90)).any():
+            raise ValueError("Latitude Y must lie within [-90,90] degrees.")
     if time:
         # DataArray.T is its transpose, whereas Dataset.T may resolve a
         # coordinate. Bracket access is unambiguous for both container types.
@@ -154,10 +160,19 @@ def canonicalize_observations(observations: xr.Dataset, unit_overrides=None,
             valid = valid & (da <= 100)
         result[name] = da.where(valid)
     output = xr.Dataset(result, attrs=dict(obj.attrs))
+    # Invalid pairs cannot support a physical joint distribution. Mask both
+    # observations rather than swapping them or inventing a diurnal range.
+    for lower, upper in (("TMIN", "TMAX"), ("HUMIN", "HUMAX")):
+        if lower in output and upper in output:
+            inverted = (np.isfinite(output[lower]) & np.isfinite(output[upper])
+                        & (output[lower] > output[upper]))
+            output[lower] = output[lower].where(~inverted)
+            output[upper] = output[upper].where(~inverted)
     output = output.assign_coords(T=pd.DatetimeIndex(output.T.values).normalize())
     if time_was_sorted:
         output.attrs["time_coordinate_repair"] = "Unique daily T coordinates sorted chronologically before analysis."
-    output.attrs["invalid_value_policy"] = "Nonfinite, negative nonnegative variables and humidity outside [0,100] masked."
+    output.attrs["invalid_value_policy"] = ("Nonfinite, negative nonnegative variables, humidity outside [0,100], "
+                                             "and inverted TMIN/TMAX or HUMIN/HUMAX pairs masked.")
     return output
 
 

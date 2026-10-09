@@ -34,3 +34,37 @@ jobs:
           cache: true
       - name: Run tests, lint, build and installed-wheel smoke test
         run: pixi run --locked release-check
+
+  neural-check:
+    name: Neural CPU / ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            cpu-index: true
+          - runner: windows-2025
+            cpu-index: true
+          - runner: macos-15-intel
+            cpu-index: false
+          - runner: macos-15
+            cpu-index: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install core and test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Install CPU PyTorch on Linux and Windows
+        if: matrix.cpu-index
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install macOS neural dependencies
+        if: ${{ !matrix.cpu-index }}
+        run: python -m pip install -e ".[ml]"
+      - name: Verify NumPy bridge and neural algorithms
+        run: |
+          python -c "import torch, numpy as np; x=torch.from_numpy(np.ones(3)); assert np.array_equal(x.numpy(), np.ones(3)); print(torch.__version__, np.__version__)"
+          python -m pytest -q tests/test_generative_audit.py tests/test_v010_generative.py

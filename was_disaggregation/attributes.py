@@ -1,23 +1,33 @@
 """Agro-climatic season attributes computed from daily rainfall.
 
-Each attribute turns daily PRCP into one number per season and site: seasonal
-total, onset date, cessation date or maximum dry-spell length. These are the
-quantities forecast by PRESASS / AGRHYMET, and each one can become a
-constraint on the historical year weights (see :mod:`was_disaggregation.mre`).
+SeasonalTotal, OnsetDate, CessationDate and MaxDrySpell turn daily PRCP into
+one value per season and site, for use as forecasts or reweighting constraints.
+Windows use MM-DD dates, omit February 29 and may cross the year boundary.
+Date values count days after the search start. Events not found are censored
+at the window length; censored_ and per-event diagnostics distinguish this
+convention from an observed event.
 
-Windows are given as ``("MM-DD", "MM-DD")`` in the calendar year of the season
-(``end < start`` crosses into the next year). February 29 is omitted, matching
-the generators' 365-day Gregorian policy. Date attributes are returned as
-**days after the start of their search window** (0 = search start), which is
-counted on this calendar and orders early -> late. A season whose event is not found
-inside the search window is *censored* at the window length (i.e. classed as
-late); ``censored_`` reports how often this happened.
+Missing rainfall remains missing. Totals require complete windows; onset and
+bucket cessation inspect the prefix needed to establish the first event.
+The public functions accept a T dimension and arbitrary spatial/member axes.
 
-Any missing day inside an attribute's data span makes that season's value NaN
-(missing is never treated as dry).
+Scientific attribution
+----------------------
+M. V. K. Sivakumar (1988), "Predicting rainy season potential from the onset
+of rains in Southern Sahelian and Sudanian climatic zones of West Africa",
+Agricultural and Forest Meteorology 42, 295-305.
+DOI: 10.1016/0168-1923(88)90039-1.
+    OnsetDate implements the accumulation plus false-start criterion with
+    configurable thresholds and dates. CessationDate(method="sivakumar")
+    implements the rainfall-only end-of-rains criterion. Changing their
+    defaults defines a variant; the 58-location experiment is not reproduced.
+    CessationDate(method="bucket") is a package bucket-water-balance
+    convention, not Sivakumar's published rainfall-only cessation method.
+    SeasonalTotal and MaxDrySpell are descriptive statistics with explicit
+    windows. Their implementation is not attributed to a new named article.
 
-The functions accept a DataArray with a ``T`` dimension and any other
-dimensions (Y, X, member ...), stacked internally into ``site``.
+Censoring, required-data padding and missing-prefix checks are package
+extensions, not demonstrated improvements to agricultural forecast skill.
 """
 from __future__ import annotations
 
@@ -95,7 +105,7 @@ def extract_windows(prcp, years, start, end, pad_after=0):
     out = np.full((len(years), n, stacked.sizes["site"]), np.nan)
     for i, dates in enumerate(spans):
         values = stacked.reindex(T=dates).values
-        out[i, :lengths[i]] = values
+        out[i, :lengths[i]] = np.where(np.isfinite(values) & (values >= 0), values, np.nan)
     return out
 
 
@@ -125,11 +135,19 @@ class Attribute:
     def compute(self, prcp: xr.DataArray, years) -> xr.DataArray:
         """Attribute per season year, as DataArray (season_year, <other dims>)."""
         years = [int(y) for y in np.atleast_1d(years)]
+        if not years or len(set(years)) != len(years):
+            raise ValueError("years must be nonempty and unique")
         _, template = _stack(prcp)
+        self._censored_values = None
         values = self.values(prcp, years)
         out = _reshape(values, template, ("season_year", years))
         out.name = self.name
         out.attrs.update(units=self.units, definition=repr(self), calendar_policy="Gregorian; February 29 omitted")
+        if self._censored_values is not None:
+            observed = np.where(np.isfinite(values), 1. - self._censored_values, np.nan)
+            out = out.assign_coords(event_observed=_reshape(observed, template, ("season_year", years)))
+            out.event_observed.attrs.update(description="1 = event found; 0 = right-censored; NaN = unresolved missing data")
+            out.attrs["censoring_policy"] = "No event is represented by the window length; this is a capped event variable, not an exact date."
         return out
 
     def span(self):
@@ -167,9 +185,19 @@ class OnsetDate(Attribute):
     First day ``d`` of the search window such that
       * rain accumulated over days d .. d+accumulation_days-1 >= accumulation_mm,
       * at least ``min_wet_days`` of those days are wet (>= wet_threshold),
-      * no dry spell longer than ``dry_spell_days`` occurs in the following
-        ``check_days`` days (false-start check).
+      * no dry spell longer than ``dry_spell_days`` occurs in days
+        d+1 .. d+``check_days`` (false-start check; the three accumulation
+        days are part of these 30 days, as in Sivakumar 1988).
     Returned as days after ``search[0]``; censored at the window length.
+    Missing dates are checked only for candidates that could precede the
+    first valid onset; an early validated onset needs no data at the far end
+    of the search window or its padding.
+
+    References
+    ----------
+    M. V. K. Sivakumar (1988), DOI: 10.1016/0168-1923(88)90039-1;
+    see the module bibliography. Configurable thresholds, min_wet_days,
+    calendar policy and censoring are explicit implementation conventions.
     """
     search: tuple = ("05-01", "09-30")
     accumulation_mm: float = 20.0
@@ -196,7 +224,7 @@ class OnsetDate(Attribute):
             raise ValueError("wet_threshold must be positive")
 
     def span(self):
-        return self.search[0], self.search[1], self.check_days + self.accumulation_days - 1
+        return self.search[0], self.search[1], max(self.check_days, self.accumulation_days - 1)
 
     def values(self, prcp, years):
         onset, _ = self._onset(prcp, years)
@@ -207,48 +235,73 @@ class OnsetDate(Attribute):
             x = extract_windows(prcp, years, *self.span()[:2], pad_after=self.span()[2])
         ny, nd, ns = x.shape
         length = np.array([_window_length(y, *self.search) for y in years])
-        missing = np.zeros((ny, ns), dtype=bool)
-        for i, n in enumerate(length):
-            missing[i] = ~np.isfinite(x[i, :n + self.span()[2]]).all(axis=0)
-        xf = np.nan_to_num(x)
-        wet = xf >= self.wet_threshold
+        finite = np.isfinite(x)
+        xf = np.where(finite, x, 0.)
+        # Missing observations must not act as dry days: a known, long dry
+        # spell still rules out a candidate, while a gap otherwise leaves it
+        # undecidable.
+        wet = ~finite | (xf >= self.wet_threshold)
         k = self.accumulation_days
         csum = np.concatenate([np.zeros((ny, 1, ns)), np.cumsum(xf, axis=1)], axis=1)
-        cwet = np.concatenate([np.zeros((ny, 1, ns)), np.cumsum(wet, axis=1)], axis=1)
+        cwet = np.concatenate([np.zeros((ny, 1, ns)), np.cumsum(finite & wet, axis=1)], axis=1)
+        cmissing = np.concatenate([np.zeros((ny, 1, ns), dtype=int),
+                                   np.cumsum(~finite, axis=1)], axis=1)
         idx = np.arange(nd - k + 1)
         accum = csum[:, idx + k] - csum[:, idx]
         nwet = cwet[:, idx + k] - cwet[:, idx]
         candidate = (accum >= self.accumulation_mm) & (nwet >= self.min_wet_days)
-        # longest dry spell strictly after the accumulation window, within check_days
+        complete_accum = (cmissing[:, idx + k] - cmissing[:, idx]) == 0
+        # Sivakumar's 30-day check starts immediately after the candidate
+        # onset day, including days 2 and 3 of the accumulation window.
         run = _dry_run_ending(wet)
         longest = np.zeros(candidate.shape, dtype=np.int32)
         for j in range(1, self.check_days + 1):
-            pos = idx + k - 1 + j
+            pos = idx + j
             ok = pos < nd
             r = np.zeros(candidate.shape, dtype=np.int32)
             r[:, ok] = np.minimum(run[:, pos[ok]], j)
             longest = np.maximum(longest, r)
-        good = candidate & (longest <= self.dry_spell_days)
+        check_end = idx + self.check_days + 1
+        complete_check = np.zeros(candidate.shape, dtype=bool)
+        ok = check_end <= nd
+        complete_check[:, ok] = ((cmissing[:, check_end[ok]] - cmissing[:, idx[ok] + 1]) == 0)
+        too_dry = longest > self.dry_spell_days
+        good = candidate & complete_accum & complete_check & ~too_dry
+        unresolved = ~complete_accum | (candidate & ~complete_check & ~too_dry)
         onset = np.full((ny, ns), np.nan)
         censored = np.zeros((ny, ns), dtype=bool)
         for i, n in enumerate(length):
             g = good[i, :n]
+            u = unresolved[i, :n]
             found = g.any(axis=0)
-            first = np.argmax(g, axis=0)
-            onset[i] = np.where(found, first, n)
-            censored[i] = ~found
-        onset[missing] = np.nan
-        self.censored_ = float(np.mean(censored[~missing])) if (~missing).any() else np.nan
+            first = np.where(found, np.argmax(g, axis=0), n)
+            unknown = u.any(axis=0) & (np.argmax(u, axis=0) <= first)
+            onset[i] = np.where(unknown, np.nan, first)
+            censored[i] = ~found & ~unknown
+        known = np.isfinite(onset)
+        self._censored_values = censored.astype(float)
+        self.censored_ = float(np.mean(censored[known])) if known.any() else np.nan
         return onset, x
 
 
 @dataclass
 class CessationDate(Attribute):
-    """End of season from a bucket water balance (AGRHYMET-style).
+    """End of season from a bucket water balance (AGRHYMET-style, default).
 
     Soil water S starts at 0 on ``balance_start`` and evolves as
     S = clip(S + P - et_mm, 0, capacity_mm). Cessation is the first day of
     ``search`` on which S = 0 (days after ``search[0]``); censored if never.
+
+    ``method="sivakumar"`` instead returns the first candidate day after
+    which *no rain* falls during the next 20 days, matching the rainfall-only
+    ending-of-rains criterion in Sivakumar (1988). For the paper's strictly
+    post-September-1 candidates use ``search=("09-02", "11-30")``.
+
+    References
+    ----------
+    M. V. K. Sivakumar (1988), DOI: 10.1016/0168-1923(88)90039-1,
+    for method="sivakumar" only. The default bucket method is a package
+    water-balance variant; it is not the cessation equation of that article.
     """
     search: tuple = ("09-01", "11-30")
     balance_start: str = "05-01"
@@ -256,19 +309,52 @@ class CessationDate(Attribute):
     et_mm: float = 5.0
     name: str = "cessation"
     units: str = "days after search start"
+    method: str = "bucket"
+    initial_soil_mm: float = 0.0
 
     def __post_init__(self):
         _window(2001, *self.search)
+        if self.method not in {"bucket", "sivakumar"}:
+            raise ValueError("method must be 'bucket' or 'sivakumar'")
         _window(2001, self.balance_start, self.search[1])
         if not np.isfinite(self.capacity_mm) or self.capacity_mm <= 0:
             raise ValueError("capacity_mm must be positive")
         if not np.isfinite(self.et_mm) or self.et_mm < 0:
             raise ValueError("et_mm must be finite and nonnegative")
+        if not np.isfinite(self.initial_soil_mm) or not 0 <= self.initial_soil_mm <= self.capacity_mm:
+            raise ValueError("initial_soil_mm must lie in [0, capacity_mm]")
 
     def span(self):
+        if self.method == "sivakumar":
+            return self.search[0], self.search[1], 20
         return self.balance_start, self.search[1], 0
 
     def values(self, prcp, years):
+        if self.method == "sivakumar":
+            x = extract_windows(prcp, years, *self.search, pad_after=20)
+            ny, nd, ns = x.shape
+            result = np.full((ny, ns), np.nan)
+            for i, year in enumerate(years):
+                n = _window_length(year, *self.search)
+                block = x[i]
+                # Only following days enter the rainfall-only criterion;
+                # a later gap cannot undo an earlier confirmed ending.
+                found = np.zeros(ns, dtype=bool)
+                unknown = np.zeros(ns, dtype=bool)
+                for d in range(n):
+                    following = block[d + 1:d + 21]
+                    has_rain = (np.isfinite(following) & (following > 0)).any(axis=0)
+                    complete = np.isfinite(following).all(axis=0)
+                    hit = complete & ~has_rain & ~found & ~unknown
+                    result[i, hit] = d
+                    found |= hit
+                    unknown |= ~complete & ~has_rain & ~found
+                result[i, ~found & ~unknown] = n
+            lengths = np.asarray([_window_length(y, *self.search) for y in years])[:, None]
+            self._censored_values = (result >= lengths).astype(float)
+            known = np.isfinite(result)
+            self.censored_ = float(self._censored_values[known].mean()) if known.any() else np.nan
+            return result
         x = extract_windows(prcp, years, self.balance_start, self.search[1])
         ny, nd, ns = x.shape
         out = np.full((ny, ns), np.nan)
@@ -281,17 +367,22 @@ class CessationDate(Attribute):
             n = len(dates)
             offset = int((dates < s0).sum())
             block = x[i, :n]
-            miss = ~np.isfinite(block).all(axis=0)
-            soil = np.zeros(ns)
+            soil = np.full(ns, self.initial_soil_mm)
             result = np.full(ns, float(n - offset))
             found = np.zeros(ns, dtype=bool)
+            unknown = np.zeros(ns, dtype=bool)
             for d in range(n):
+                unknown |= ~np.isfinite(block[d]) & ~found
                 soil = np.clip(soil + np.nan_to_num(block[d]) - self.et_mm, 0, self.capacity_mm)
                 if d >= offset:
-                    hit = (soil <= 0) & ~found
+                    hit = (soil <= 0) & ~found & ~unknown
                     result[hit] = d - offset
                     found |= hit
-            out[i] = np.where(miss, np.nan, result)
+            out[i] = np.where(unknown, np.nan, result)
+        lengths = np.asarray([_window_length(y, *self.search) for y in years])[:, None]
+        self._censored_values = (out >= lengths).astype(float)
+        known = np.isfinite(out)
+        self.censored_ = float(self._censored_values[known].mean()) if known.any() else np.nan
         return out
 
 

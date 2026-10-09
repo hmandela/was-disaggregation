@@ -30,7 +30,14 @@ Issues = "https://github.com/hmandela/was-disaggregation/issues"
 [project.optional-dependencies]
 notebooks = ["jupyterlab>=4", "nbformat>=5.9", "nbclient>=0.9", "matplotlib>=3.7"]
 dask = ["dask[array,distributed]>=2023.6"]
-ml = ["torch>=2.1"]
+# Official Intel-macOS wheels stop at PyTorch 2.2.x (Python <= 3.12).
+# Those legacy binary wheels need NumPy 1.x for the tensor/NumPy bridge.
+# https://pytorch.org/blog/pytorch2-2/
+ml = [
+    "torch>=2.1; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "torch>=2.1,<2.3; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "numpy>=1.24,<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+]
 test = ["pytest>=7.4"]
 
 [project.scripts]

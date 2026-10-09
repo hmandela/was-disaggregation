@@ -1,4 +1,9 @@
-"""Small operational entry point; notebooks describe the statistical choices."""
+"""Small operational entry point; notebooks describe the statistical choices.
+
+This module is package command-line infrastructure. The --paper-protocol
+choices refer to the scientific authors documented in model, rainfall and
+srg3; the command-line interface itself does not reproduce an article.
+"""
 import argparse
 from pathlib import Path
 from .data import open_observations, load_probabilities, prepare_probabilities
@@ -21,6 +26,11 @@ def main(argv=None):
     p.add_argument("--seed",type=int,default=42)
     p.add_argument("--wet-threshold",type=float,default=1.0)
     p.add_argument("--spatial",choices=["distance","independent"],default="distance")
+    p.add_argument("--paper-protocol", choices=["houngnibo_2023_srg1", "houngnibo_2023_srg2",
+                                               "houngnibo_2023_srg3", "wilks_2002"],
+                   help="Fix the statistical conventions of the selected article; overrides generic rain options")
+    p.add_argument("--n-features", type=int, default=128,
+                   help="Spatial Fourier frequencies; larger values reduce latent covariance approximation error")
     p.add_argument("--conditioning",choices=["mean","mixture"],default="mean",
                    help="mean = averaged parameters; mixture = per-member parameter class (adds between-class variability)")
     p.add_argument("--class-draw",choices=["fitted","shared"],default="fitted")
@@ -34,8 +44,15 @@ def main(argv=None):
     p.add_argument("--dry-spell-days",type=int,default=50,help="Post-onset window for --dry-spell")
     p.add_argument("--cessation",help="NetCDF: cessation probabilities (early, normal, late)")
     p.add_argument("--tolerance",type=float,default=0.01,help="Probability tolerance tau of each constraint")
+    p.add_argument("--constraint-mode", choices=["soft", "exact"], default="soft",
+                   help="exact enforces feasible historical category masses; soft uses a penalty")
     p.add_argument("--amounts",choices=["gamma","mixed_exponential"],default="gamma")
-    p.add_argument("--persistence",choices=["climatology","weighted","independent"],default="climatology")
+    p.add_argument("--persistence",choices=["climatology","weighted","independent","yearly"],default="climatology")
+    p.add_argument("--wet-rule", choices=["ge", "gt"], default="ge")
+    p.add_argument("--amount-basis", choices=["excess", "raw"], default="excess")
+    p.add_argument("--reset-each-month", action="store_true")
+    p.add_argument("--tmin-forecast", help="Independent seasonal TMIN tercile probabilities NetCDF")
+    p.add_argument("--tmax-forecast", help="Independent seasonal TMAX tercile probabilities NetCDF")
     p.add_argument("--occurrence",choices=["markov","spell"],default="markov",
                    help="spell = run-length dependent (semi-Markov) wet/dry sequence; use with --dry-spell")
     p.add_argument("--no-trace",action="store_true",help="Set sub-threshold rain to zero (v0.1 behaviour)")
@@ -55,6 +72,9 @@ def main(argv=None):
         w,s,e,n=args.bbox
         obs=obs.where((obs.X>=w)&(obs.X<=e)&(obs.Y>=s)&(obs.Y<=n),drop=True)
     forecast=load_probabilities(args.forecast,target=obs)
+    temperature_probabilities = {
+        name: load_probabilities(path, target=obs)
+        for name, path in (("TMIN", args.tmin_forecast), ("TMAX", args.tmax_forecast)) if path}
     constraints=_constraints(args)
     weighting=args.weighting if not constraints or args.weighting in ("mre","croley") else "mre"
     print(f"Generating {args.members} members on {obs.sizes['Y']} x {obs.sizes['X']} cells; baseline {args.climatology} (must match forecast provider).")
@@ -62,7 +82,10 @@ def main(argv=None):
         result=generate_dask(obs,forecast,year=args.year,n_members=args.members,months=tuple(args.months),
             climatology=tuple(args.climatology),tile_shape=tuple(args.tile),member_batch=args.member_batch,
             seed=args.seed,wet_threshold=args.wet_threshold,spatial=args.spatial,
+            paper_protocol=args.paper_protocol,n_features=args.n_features,
             conditioning=args.conditioning,class_draw=args.class_draw,weighting=weighting,
+            constraint_mode=args.constraint_mode,temperature_probabilities=temperature_probabilities or None,
+            wet_rule=args.wet_rule,amount_basis=args.amount_basis,reset_each_month=args.reset_each_month,
             constraints=constraints or None,occurrence=args.occurrence,
             amount_distribution=args.amounts,persistence=args.persistence,trace_rainfall=not args.no_trace)
         dest=Path(args.output)

@@ -62,12 +62,26 @@ def verify_wheel():
         directory = Path(tmp)
         # Reuse scientific dependencies, while installing the wheel in a clean
         # venv and running outside the source tree. Do not resolve from TestPyPI.
-        venv.EnvBuilder(with_pip=True, system_site_packages=True).create(directory / "env")
+        venv.EnvBuilder(with_pip=True).create(directory / "env")
         executable = directory / "env" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         env = os.environ.copy()
-        # Strip source entries from an optional developer PYTHONPATH.
-        paths = env.get("PYTHONPATH", "").split(os.pathsep)
-        env["PYTHONPATH"] = os.pathsep.join(p for p in paths if p and not Path(p).resolve().is_relative_to(ROOT))
+        # A nested venv does not inherit the parent venv's scientific packages.
+        # Append the invoking interpreter's dependency paths *after* the new
+        # environment's site-packages so the installed wheel always wins.
+        site_dir = Path(subprocess.check_output(
+            [str(executable), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            cwd=directory, text=True).strip())
+        dependency_paths = [str(path) for entry in sys.path if entry
+                            for path in [Path(entry).resolve()]
+                            # Pixi and local venv dependencies live below ROOT.
+                            # Exclude only the source import directory, not its
+                            # entire subtree, or an actual Pixi wheel check loses
+                            # NumPy and all other parent-environment packages.
+                            if path.is_dir() and path != ROOT.resolve()
+                            and not path.is_relative_to(directory)]
+        (site_dir / "_was_parent_dependencies.pth").write_text(
+            "\n".join(dict.fromkeys(dependency_paths)) + "\n", encoding="utf-8")
+        env.pop("PYTHONPATH", None)
         run(executable, "-m", "pip", "install", "--no-deps", wheel, cwd=directory, env=env)
         code = (
             "from pathlib import Path; import was_disaggregation as w; "
